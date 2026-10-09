@@ -1,0 +1,4 @@
+* text=auto
+*.swift text eol=lf
+*.mjs text eol=lf
+*.command text eol=lf

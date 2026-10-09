@@ -1,0 +1,15 @@
+{
+  "name": "finder-icon-themes",
+  "version": "0.4.1",
+  "private": true,
+  "type": "module",
+  "description": "Reversible macOS custom icon themes for Finder and compatible file browsers",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "material-icon-theme": "5.39.0",
+    "@resvg/resvg-js": "2.6.2"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}

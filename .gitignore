@@ -1,0 +1,14 @@
+# Reproducible install/runtime output. Do not commit vendor dependencies.
+node_modules/
+.DS_Store
+._*
+Icon?
+*.log
+*.tmp
+
+# Local editor settings
+.vscode/
+.idea/
+
+# macOS binaries compiled at runtime (normally stored outside this repo)
+icon-helper
