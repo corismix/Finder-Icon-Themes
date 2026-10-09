@@ -1,107 +1,119 @@
 # Finder Icon Themes
 
-Bring developer-friendly file and folder icons to **macOS Finder** and other file browsers that honour macOS custom icons.
+Real file and folder icons in **macOS Finder** — and any other browser that honours macOS custom icons — using the artwork and associations from VS Code icon themes. The built-in theme is **[Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)**, with its real SVGs, filename/extension associations, named folders, and generic fallbacks.
 
-The built-in theme is **[Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)**, using its *real* SVG artwork, exact filename/extension associations, named folders, and generic fallback icons. The architecture keeps theme loading in `src/themes/` so other icon sets can be added later.
+It's a local command-line tool. Point it at a folder, it walks the tree once and sets a custom icon on each recognised file and folder. Run it again to update; `undo` puts things back.
 
-This is a local, on-demand command-line tool, not a Finder extension or background watcher. It **changes filesystem icon metadata** rather than changing application associations, Quick Look, or system icon themes.
+The icons are stored as filesystem metadata, so Finder, Path Finder, and similar browsers show them with no per-app theme switch. The tool does **not** change file-type associations, Quick Look previews, or system icon themes, and it is **not** a Finder extension or a background watcher — rerun it after adding files.
 
 ## Requirements
 
-- macOS with Apple Command Line Tools (`xcode-select --install` if needed)
-- Node.js 20+ and npm
-- Internet connection during initial `npm install` (to fetch the Material theme and SVG renderer)
+- macOS with Apple Command Line Tools — run `xcode-select --install` if needed
+- Node.js 20 or newer, with npm
+- An internet connection for the first install (npm fetches the theme and the SVG renderer)
 
-## Quick start
+## Install
 
-Unzip anywhere, open Terminal in the unzipped `Finder-Icon-Themes` directory, and run:
+From the project directory:
 
 ```sh
 ./setup.command
 ```
 
-Then preview a project without modifying anything:
+Setup checks for Node and the Swift compiler, runs `npm install`, writes `package-lock.json`, and — if it finds exactly one existing compatible icon journal — imports it into the current state location, keeping the original file as a backup. Nothing already in a journal is overwritten.
+
+The macOS icon helper is compiled on the first `apply` or `undo`, so that first run takes a few extra seconds.
+
+If you received this as a plain folder with no Git history, it's source-only: initialise a repository when you're ready and commit `package-lock.json` for reproducible installs. `node_modules/` is ignored.
+
+## Usage
+
+Start with a read-only preview — it never modifies anything:
 
 ```sh
-./finder-icon-themes preview ~/Code/AI/Eidolon
+./finder-icon-themes preview ~/Code/my-project
 ```
 
-Apply to that project:
+Then apply, and undo later if you change your mind:
 
 ```sh
-./finder-icon-themes apply ~/Code/AI/Eidolon
+./finder-icon-themes apply ~/Code/my-project
+./finder-icon-themes undo  ~/Code/my-project
 ```
 
-Refresh your file browser if the icons are cached. Undo **only icons installed by this tool**:
+If the icons don't appear straight away, refresh the Finder window; the folder icon cache can lag.
 
-```sh
-./finder-icon-themes undo ~/Code/AI/Eidolon
+| Command | Effect |
+| --- | --- |
+| `themes` | List the installed icon themes. |
+| `preview <folder>` | Show what would change, without writing anything. |
+| `apply <folder>` | Set icons on recognised files and folders. |
+| `undo <folder>` | Remove **only** the icons this tool installed under that folder. |
+| `status <folder>` | List the icons currently recorded for that folder. |
+
+Options for `preview` and `apply`:
+
+| Option | Meaning |
+| --- | --- |
+| `--theme NAME` | Icon theme to use (default `material`; see `themes`). |
+| `--files-only` | Leave folder icons alone. |
+| `--folders-only` | Leave file icons alone. |
+| `--limit N` | Maximum icons changed in one run (default 1200, max 20000). |
+
+Check a small project before pointing it at a large tree such as `~/Code`.
+
+## How it chooses icons
+
+Matching follows VS Code icon-theme rules, in this order:
+
+- **Files:** exact filename (`package.json`) → longest extension match (`config.test.ts` → `test.ts` → `ts`) → dotfile extension (`.env.local`) → the theme's generic file icon.
+- **Folders:** the folder's own name (`.git`, `src`) → the theme's generic folder icon.
+
+Anything the theme has no specific icon for still gets its generic file or folder icon, so the tree stays consistent rather than patchy.
+
+## What it skips
+
+- **Pre-existing custom icons are never overwritten.** If you — or another app — set an icon on a file, the tool leaves it alone and manages only icons it installed itself.
+- **Symlinks are not followed**, and it doesn't descend into dependency or build folders (`node_modules`, `dist`, `build`, `out`, `target`, `coverage`, `vendor`, `Pods`, `DerivedData`, `.venv`, `__pycache__`, and others). Those folders can still get an icon; their contents are just left unscanned.
+- **`.git` is special-cased:** the `.git` *folder* gets a real icon, but its contents are never scanned. A `.git` *pointer file* (worktrees/submodules) is left untouched.
+- Finder and OS metadata (`Icon\r`, `.DS_Store`, AppleDouble `._*` files) is skipped.
+- If a scan would exceed 120,000 entries, it stops and asks you to target a smaller folder.
+
+## Folder icons and Git
+
+A folder icon lives in a hidden `Icon\r` file inside the folder. To keep that out of `git status`, the tool appends an `Icon?` rule to each affected repository's **local** `.git/info/exclude` — never to the tracked `.gitignore`. That rule hides any `Icon` plus one-character name, so be aware if your project deliberately uses filenames like that.
+
+## State and undo
+
+Every icon the tool installs is recorded in a journal at:
+
+```text
+~/.local/state/finder-icon-themes/state.json
 ```
 
-Check which paths it manages:
+`undo` reads that journal to remove only its own icons. If a file has been moved or replaced since it was iconised, its entry is forgotten rather than applied blindly to whatever is there now.
 
-```sh
-./finder-icon-themes status ~/Code/AI/Eidolon
-```
+- Override the location with `FINDER_ICON_THEMES_HOME=/path ./finder-icon-themes apply ...`.
+- Don't run two icon synchronisers against the same files at once.
+- Switching themes replaces the icons the tool owns while keeping their undo ownership, so you can always get back to the macOS defaults.
 
-See supported themes:
-
-```sh
-./finder-icon-themes themes
-```
-
-The default is `material`. You can specify it explicitly with `--theme material` on `preview` or `apply`. `--folders-only`, `--files-only` and `--limit N` also work; the default change limit is 1,200. To apply to all projects later, target `~/Code` once you've checked a smaller project.
-
-## Initialise your own Git repository
-
-This ZIP deliberately contains **source and project configuration only**, no `.git/`, installed `node_modules/`, generated icons, caches, local icon journal, personal filesystem paths, or secrets. After extracting, you can initialise and commit it yourself:
-
-```sh
-git init
-```
-
-```sh
-git add .
-```
-
-```sh
-git commit -m "Initial commit: Finder Icon Themes"
-```
-
-The first `./setup.command` installs npm dependencies, generates `package-lock.json`, and checks for a compatible existing icon journal outside this repository. An imported journal is copied, not moved, and owned Git exclusion comments may be updated. The lockfile **should be committed** for reproducible installations. `node_modules/` is ignored. The lockfile is generated locally because this build environment cannot access npm's registry. Run setup before `git add .` if you want the lockfile in your initial commit.
-
-## Git safety and existing installs
-
-- Scans directory entries without following symlinks. Skips contents of `.git`, `node_modules`, and other dependency/build folders. It *does* give a real `.git` directory Material's Git folder icon. A `.git` pointer file (worktrees/submodules) stays untouched.
-- Folder icons can create hidden `Icon\r` files. The tool adds an `Icon?` rule to each affected repository's **local `.git/info/exclude`**, not the tracked `.gitignore`. This excludes other `Icon` + one-character names too, so be aware if your project uses those.
-- Skips pre-existing custom icons not installed by this tool. A journal outside the repository supports `undo`; moved/replaced files are not blindly modified.
-- During setup, a compatible existing icon journal is imported into `~/.local/state/finder-icon-themes/state.json` if exactly one is found. Its original is retained as a backup, and its owned Git-exclude labels are updated. No existing state is overwritten. If more than one compatible journal is found, setup stops and asks you to choose one manually.
-- State location can be overridden with `FINDER_ICON_THEMES_HOME`. Don’t run multiple icon synchronisers against the same files.
-- If an icon already belongs to the tool, a future theme can replace it while keeping the original undo ownership. **No untracked existing custom icon is overwritten.**
-
-## Project structure
+## Project layout
 
 ```text
 Finder-Icon-Themes/
-├── finder-icon-themes         CLI entry point
-├── setup.command             Install third-party dependencies
+├── finder-icon-themes    CLI entry point
+├── setup.command         Install dependencies
 ├── src/
-│   ├── cli.mjs               Commands, apply, preview and undo
-│   ├── scanner.mjs           Safe filesystem traversal
-│   ├── matcher.mjs           VS Code-style icon matching + fallbacks
-│   ├── themes/
-│   │   ├── index.mjs         Theme registry
-│   │   └── material.mjs      Material theme adapter
-│   ├── native.swift          macOS custom-icon API
-│   ├── native.mjs            Compile/run native Swift helper
-│   ├── render.mjs            SVG to PNG conversion
-│   ├── git.mjs               Local Git ignore management
-│   └── state.mjs             External undo journal
+│   ├── cli.mjs           Commands, apply/preview/undo
+│   ├── scanner.mjs       Safe filesystem traversal
+│   ├── matcher.mjs       Icon matching and fallbacks
+│   ├── themes/           Theme registry and adapters
+│   ├── native.swift      macOS custom-icon helper
+│   ├── render.mjs        SVG → PNG rendering
+│   ├── git.mjs           Local Git exclude management
+│   └── state.mjs         Undo journal
 ├── tests/
-├── docs/adding-a-theme.md
-├── package.json
-├── .gitignore
-└── LICENSE
+└── docs/adding-a-theme.md
 ```
 
 ## Development
@@ -110,10 +122,14 @@ Finder-Icon-Themes/
 npm test
 ```
 
-The Node tests cover matching, fallbacks, `.git` safety, Git exclusions, and one-time state import without hard-coded previous product names. Native icon application requires macOS and has **not been re-run in this build environment**. The macOS icon application uses Apple’s `NSWorkspace.setIcon` API.
+The tests cover icon matching and fallbacks, `.git` safety, local Git exclusions, journal import, and the guarantee that `preview`/`status` leave files untouched. Applying icons goes through Apple's `NSWorkspace.setIcon` API and needs macOS, so it isn't exercised by the test suite.
 
-See [docs/adding-a-theme.md](docs/adding-a-theme.md) for the extension boundary. Other themes are not implemented yet; `themes` currently lists Material only.
+## Adding another theme
 
-## Credits
+Only Material ships today, and the theme seam is deliberately small. See [docs/adding-a-theme.md](docs/adding-a-theme.md) to add another icon set.
 
-[Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) by Material Extensions / PKief (MIT); SVG rendering by [resvg-js](https://github.com/yisibl/resvg-js) (MPL-2.0). Their packages are installed from npm and are not vendored into this Git repository. Independent project, not affiliated with the Material Extensions maintainers.
+## Credits and licence
+
+[Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) by Material Extensions / PKief (MIT); SVG rendering by [resvg-js](https://github.com/yisibl/resvg-js) (MPL-2.0). Their packages come from npm and are not vendored here.
+
+This project is MIT-licensed (see [LICENSE](LICENSE)) and is independent — not affiliated with the Material Extensions maintainers.
