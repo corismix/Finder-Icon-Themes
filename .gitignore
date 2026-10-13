@@ -1,5 +1,7 @@
-# Reproducible install/runtime output. Do not commit vendor dependencies.
-node_modules/
+# Reproducible install/runtime output.
+/target
+
+# macOS filesystem metadata this tool creates.
 .DS_Store
 ._*
 Icon?
@@ -9,6 +11,3 @@ Icon?
 # Local editor settings
 .vscode/
 .idea/
-
-# macOS binaries compiled at runtime (normally stored outside this repo)
-icon-helper

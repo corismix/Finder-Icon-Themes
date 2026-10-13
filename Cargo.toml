@@ -1,0 +1,33 @@
+[package]
+name = "finder-icon-themes"
+version = "1.0.0"
+edition = "2021"
+description = "Automatic macOS custom icons for git repositories"
+license = "MIT"
+
+[[bin]]
+name = "finder-icon-themes"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "7"
+flate2 = "1"
+notify = "8"
+resvg = "0.48"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+toml = "0.8"
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSImage"] }
+
+[profile.release]
+lto = true
+strip = true
