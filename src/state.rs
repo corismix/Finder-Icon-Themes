@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -57,6 +57,8 @@ pub struct State {
     pub entries: BTreeMap<String, Entry>,
     #[serde(default)]
     pub excludes: Excludes,
+    #[serde(skip)]
+    pub identities: HashMap<String, String>,
 }
 
 impl Default for State {
@@ -65,7 +67,30 @@ impl Default for State {
             schema: SCHEMA,
             entries: BTreeMap::new(),
             excludes: Excludes::default(),
+            identities: HashMap::new(),
         }
+    }
+}
+
+impl State {
+    pub fn rebuild_index(&mut self) {
+        self.identities = self
+            .entries
+            .iter()
+            .map(|(p, e)| (e.identity.clone(), p.clone()))
+            .collect();
+    }
+    pub fn insert(&mut self, key: String, entry: Entry) -> Option<Entry> {
+        if let Some(old) = self.entries.get(&key) {
+            self.identities.remove(&old.identity);
+        }
+        self.identities.insert(entry.identity.clone(), key.clone());
+        self.entries.insert(key, entry)
+    }
+    pub fn remove(&mut self, key: &str) -> Option<Entry> {
+        let entry = self.entries.remove(key)?;
+        self.identities.remove(&entry.identity);
+        Some(entry)
     }
 }
 
@@ -106,6 +131,7 @@ pub fn read_state(file: &Path) -> Result<State> {
         state.schema
     );
     state.schema = SCHEMA;
+    state.rebuild_index();
     Ok(state)
 }
 
@@ -168,6 +194,19 @@ pub fn identity(path: &Path) -> Result<String> {
     let meta =
         fs::symlink_metadata(path).with_context(|| format!("Cannot stat {}", path.display()))?;
     Ok(identity_of(&meta))
+}
+
+/// Ordered journal range prevents a path update from walking unrelated records.
+pub fn scoped_entries<'a>(
+    state: &'a State,
+    root: &Path,
+) -> impl Iterator<Item = (&'a String, &'a Entry)> {
+    let key = root.to_string_lossy().trim_end_matches('/').to_string();
+    let end = format!("{key}\u{10ffff}");
+    state
+        .entries
+        .range(key.clone()..end)
+        .filter(move |(p, _)| is_within(Path::new(&key), Path::new(p)))
 }
 
 pub fn is_within(root: &Path, item: &Path) -> bool {

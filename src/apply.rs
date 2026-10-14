@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::macos;
 use crate::render::png_for;
 use crate::scanner::{collect_candidates, Candidate};
-use crate::state::{identity, is_within, save_state, state_paths, Entry, State};
+use crate::state::{identity, save_state, scoped_entries, state_paths, Entry, State};
 use crate::theme::Theme;
 
 /// Write the journal once per this many icons instead of once per icon. The
@@ -64,10 +64,7 @@ pub fn apply(
 ) -> Result<ApplyReport> {
     let candidates = candidates_for(root, theme, config)?;
     // Recover renames within a reconciliation scope before pruning old paths.
-    let identities: HashMap<String, String> = state
-        .entries
-        .iter()
-        .filter(|(p, _)| is_within(root, Path::new(p)))
+    let identities: HashMap<String, String> = scoped_entries(state, root)
         .map(|(p, e)| (e.identity.clone(), p.clone()))
         .collect();
     let mut moved = false;
@@ -88,11 +85,8 @@ pub fn apply(
 /// Transfer ownership by identity, including all descendants of a moved folder.
 /// Never overwrite an unrelated destination record or follow symbolic links.
 pub fn transfer_move(from: &Path, to: &Path, state: &mut State) -> Result<bool> {
-    let keys: Vec<_> = state
-        .entries
-        .keys()
-        .filter(|p| is_within(from, Path::new(p)))
-        .cloned()
+    let keys: Vec<_> = scoped_entries(state, from)
+        .map(|(p, _)| p.clone())
         .collect();
     let mut dirty = false;
     for key in keys {
@@ -119,8 +113,8 @@ pub fn transfer_move(from: &Path, to: &Path, state: &mut State) -> Result<bool> 
         if state.entries.contains_key(&target) {
             continue;
         }
-        let record = state.entries.remove(&key).unwrap();
-        state.entries.insert(target, record);
+        let record = state.remove(&key).unwrap();
+        state.insert(target, record);
         dirty = true;
     }
     Ok(dirty)
@@ -142,9 +136,20 @@ pub fn apply_candidates(
     for item in candidates {
         let key = item.path.to_string_lossy().into_owned();
         let current = identity(&item.path)?;
+        if !state.entries.contains_key(&key) {
+            if let Some(old) = state.identities.get(&current).cloned() {
+                if old != key
+                    && Path::new(&old)
+                        .symlink_metadata()
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                {
+                    dirty |= transfer_move(Path::new(&old), &item.path, state)?;
+                }
+            }
+        }
         let mut prev = state.entries.get(&key).cloned();
         if prev.as_ref().is_some_and(|p| p.identity != current) {
-            state.entries.remove(&key);
+            state.remove(&key);
             dirty = true;
             prev = None;
         }
@@ -209,7 +214,7 @@ pub fn apply_candidates(
                 payload: previous.as_ref().and_then(|p| p.payload.clone()),
                 pending: true,
             };
-            state.entries.insert(key.clone(), record);
+            state.insert(key.clone(), record);
             pending.push((key, previous, png, item));
         }
         // Durable intent precedes AppKit. Successful fingerprints checkpoint in
@@ -239,10 +244,10 @@ pub fn apply_candidates(
                     if !macos::has_custom_icon(&item.path) {
                         match previous {
                             Some(p) => {
-                                state.entries.insert(key, p);
+                                state.insert(key, p);
                             }
                             None => {
-                                state.entries.remove(&key);
+                                state.remove(&key);
                             }
                         }
                         dirty = true;
@@ -262,11 +267,8 @@ pub fn apply_candidates(
 }
 
 pub fn undo(root: &Path, state: &mut State) -> Result<UndoReport> {
-    let keys = state
-        .entries
-        .keys()
-        .filter(|p| is_within(root, Path::new(p)))
-        .cloned()
+    let keys = scoped_entries(state, root)
+        .map(|(p, _)| p.clone())
         .collect();
     remove_keys(keys, state)
 }
@@ -290,7 +292,7 @@ pub fn remove_keys(keys: Vec<String>, state: &mut State) -> Result<UndoReport> {
                             .symlink_metadata()
                             .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
                 {
-                    state.entries.remove(key);
+                    state.remove(key);
                     dirty = true;
                     report.stale += 1;
                     continue;
@@ -301,7 +303,7 @@ pub fn remove_keys(keys: Vec<String>, state: &mut State) -> Result<UndoReport> {
                 }
             };
             if record.identity != current {
-                state.entries.remove(key);
+                state.remove(key);
                 dirty = true;
                 report.stale += 1;
                 continue;
@@ -325,7 +327,7 @@ pub fn remove_keys(keys: Vec<String>, state: &mut State) -> Result<UndoReport> {
                 }
                 report.removed += 1;
             }
-            state.entries.remove(key);
+            state.remove(key);
             dirty = true;
         }
         // Icons first on removal: interruption leaves retryable ownership.
@@ -347,22 +349,23 @@ pub fn remove_keys(keys: Vec<String>, state: &mut State) -> Result<UndoReport> {
 /// Prune only definitively missing paths in the affected scope. Permission and
 /// transient metadata errors never discard ownership.
 pub fn prune(state: &mut State, within: Option<&Path>) -> Result<()> {
-    let keys: Vec<String> = state
-        .entries
-        .keys()
-        .filter(|p| within.map(|r| is_within(r, Path::new(p))).unwrap_or(true))
-        .filter(|p| {
+    let entries: Box<dyn Iterator<Item = (&String, &Entry)> + '_> = match within {
+        Some(root) => Box::new(scoped_entries(state, root)),
+        None => Box::new(state.entries.iter()),
+    };
+    let keys: Vec<String> = entries
+        .filter(|(p, _)| {
             Path::new(p)
                 .symlink_metadata()
                 .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
         })
-        .cloned()
+        .map(|(p, _)| p.clone())
         .collect();
     if keys.is_empty() {
         return Ok(());
     }
     for key in keys {
-        state.entries.remove(&key);
+        state.remove(&key);
     }
     if state.entries.is_empty() {
         crate::git::remove_global_rule(state)?;
@@ -371,10 +374,7 @@ pub fn prune(state: &mut State, within: Option<&Path>) -> Result<()> {
 }
 
 pub fn status(root: &Path, state: &State) -> Vec<(String, bool, String)> {
-    state
-        .entries
-        .iter()
-        .filter(|(p, _)| is_within(root, Path::new(p)))
+    scoped_entries(state, root)
         .map(|(p, e)| {
             let relative = Path::new(p)
                 .strip_prefix(root)

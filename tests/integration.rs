@@ -510,3 +510,60 @@ fn lock_is_released_on_exit_and_read_happens_after_lock() {
     assert!(child.wait().unwrap().success());
     let _guard = MutationLock::acquire(&sandbox.path("state")).unwrap();
 }
+
+#[test]
+fn watcher_filters_churn_and_repairs_saves_and_moves() {
+    use std::time::{Duration, Instant};
+    let sandbox = Sandbox::new("incremental");
+    let repo = fs::canonicalize(sandbox.git_repo("project")).unwrap();
+    fs::create_dir(repo.join("node_modules")).unwrap();
+    fs::create_dir(repo.join("src")).unwrap();
+    let file = repo.join("src/a.ts");
+    fs::write(&file, "initial").unwrap();
+    sandbox.write_config(&[repo.clone()]);
+    let mut child = sandbox
+        .command()
+        .arg("watch")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    struct Stop<'a>(&'a mut std::process::Child);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _stop = Stop(&mut child);
+    let journal = sandbox.path("state/state.json");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !finder_icon_themes::macos::has_custom_icon(&file) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(finder_icon_themes::macos::has_custom_icon(&file));
+    std::thread::sleep(Duration::from_secs(2));
+    let before = fs::metadata(&journal).unwrap().modified().unwrap();
+    for i in 0..100 {
+        fs::write(repo.join(format!("node_modules/{i}.ts")), "build").unwrap();
+    }
+    fs::write(&file, "content-only").unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(fs::metadata(&journal).unwrap().modified().unwrap(), before);
+    fs::write(repo.join("replacement"), "new object").unwrap();
+    fs::rename(repo.join("replacement"), &file).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !finder_icon_themes::macos::has_custom_icon(&file) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(finder_icon_themes::macos::has_custom_icon(&file));
+    let moved = repo.join("src/b.ts");
+    fs::rename(&file, &moved).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !sandbox.journal()["entries"][moved.to_str().unwrap()].is_object()
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(sandbox.journal()["entries"][moved.to_str().unwrap()].is_object());
+}

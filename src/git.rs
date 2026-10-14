@@ -32,6 +32,9 @@ pub fn discover_repos(root: &Path) -> Vec<PathBuf> {
     let mut repos = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        if crate::scanner::opted_out(&dir) {
+            continue;
+        }
         if is_repo(&dir) {
             repos.push(dir);
             continue;
@@ -44,6 +47,9 @@ pub fn discover_repos(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let path = entry.path();
+            if crate::scanner::opted_out(&path) {
+                continue;
+            }
             if is_repo(&path) {
                 repos.push(path);
                 continue;

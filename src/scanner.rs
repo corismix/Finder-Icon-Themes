@@ -21,12 +21,110 @@ pub struct Candidate {
     pub source: String,
 }
 
-fn skipped_name(name: &str) -> bool {
+pub fn skipped_name(name: &str) -> bool {
     name == "Icon\r" || name == ".DS_Store" || name == OPT_OUT_MARKER || name.starts_with("._")
 }
 
-fn opted_out(dir: &Path) -> bool {
+pub fn opted_out(dir: &Path) -> bool {
     dir.join(OPT_OUT_MARKER).exists()
+}
+
+/// Shared scanner/watcher boundary. Built-in build folders keep their own
+/// folder icon, but descendants are ignored. Never follow symlink ancestors.
+pub fn allowed_path(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    if opted_out(root) {
+        return false;
+    }
+    let components: Vec<_> = relative.components().collect();
+    let mut current = root.to_path_buf();
+    for (i, part) in components.iter().enumerate() {
+        let name = part.as_os_str().to_string_lossy();
+        if skipped_name(&name) || (i + 1 < components.len() && skips_contents(&name)) {
+            return false;
+        }
+        current.push(part.as_os_str());
+        if opted_out(&current)
+            || current
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn candidate_at(
+    root: &Path,
+    path: &Path,
+    manifest: &Manifest,
+    files: bool,
+    folders: bool,
+) -> Result<Option<Candidate>> {
+    if path == root || !allowed_path(root, path) {
+        return Ok(None);
+    }
+    let meta = match path.symlink_metadata() {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let directory = meta.is_dir();
+    if meta.file_type().is_symlink()
+        || (!directory && !meta.is_file())
+        || (directory && !folders)
+        || (!directory && !files)
+    {
+        return Ok(None);
+    }
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    if name == ".git" && !directory {
+        return Ok(None);
+    }
+    Ok(
+        find_icon(&name, directory, manifest, false).map(|m| Candidate {
+            path: path.to_path_buf(),
+            relative: path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned(),
+            directory,
+            id: m.id,
+            source: m.source,
+        }),
+    )
+}
+
+/// Reconcile a single object or a newly created/moved subtree. A normal file
+/// save never traverses its parent repository.
+pub fn collect_at(
+    root: &Path,
+    path: &Path,
+    recursive: bool,
+    manifest: &Manifest,
+    files: bool,
+    folders: bool,
+) -> Result<Vec<Candidate>> {
+    if !allowed_path(root, path) {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    if let Some(item) = candidate_at(root, path, manifest, files, folders)? {
+        found.push(item);
+    }
+    if recursive
+        && path.is_dir()
+        && !path
+            .file_name()
+            .is_some_and(|n| skips_contents(&n.to_string_lossy()))
+    {
+        found.extend(collect_candidates(path, manifest, files, folders)?);
+    }
+    Ok(found)
 }
 
 /// Collect every file and folder under `root` that should carry a custom icon.
@@ -47,7 +145,8 @@ pub fn collect_candidates(
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir)?.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let file_type = entry.file_type()?;
+            let is_dir = file_type.is_dir();
             // Iconise a real `.git` folder, but never descend into it. A `.git`
             // file (worktree/submodule pointer) is left alone.
             if name == ".git" && !is_dir {
@@ -60,7 +159,6 @@ pub fn collect_candidates(
             if inspected > MAX_ENTRIES {
                 bail!("Scan stopped at {MAX_ENTRIES} entries. Choose a smaller folder.");
             }
-            let file_type = entry.file_type()?;
             if file_type.is_symlink() {
                 continue;
             }
