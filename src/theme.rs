@@ -76,7 +76,7 @@ impl Theme {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if !name.ends_with(".svg") {
+        if !name.ends_with(".svg") && !(cfg!(feature = "extended-svg") && name.ends_with(".svgz")) {
             bail!("Unexpected icon resource: {source}");
         }
         match &self.source {
@@ -88,7 +88,7 @@ impl Theme {
                 let candidate = manifest_dir.join(source);
                 let path = fs::canonicalize(&candidate)
                     .with_context(|| format!("Cannot read icon {}", candidate.display()))?;
-                if !path.starts_with(&root) {
+                if !path.starts_with(root) {
                     bail!("Icon {source} points outside the theme package");
                 }
                 fs::read(&path)

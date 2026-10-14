@@ -25,7 +25,7 @@ sources = {'icons/' + pathlib.PurePosixPath(d['iconPath']).name for d in manifes
 missing = sources - files.keys()
 if missing:
     raise ValueError(f'Missing resources: {sorted(missing)}')
-keep = {'material-icons.json'} | sources | {key for key in files if any(word in key.lower() for word in ('license', 'notice', 'copyright', 'attribution'))}
+keep = {'material-icons.json'} | sources | {key for key in files if not key.endswith('.svg') and any(word in key.lower() for word in ('license', 'notice', 'copyright', 'attribution'))}
 files['material-icons.json'] = json.dumps(manifest, separators=(',', ':'), ensure_ascii=False).encode()
 with open(sys.argv[2], 'wb') as output:
     with gzip.GzipFile(filename='', mode='wb', fileobj=output, mtime=0, compresslevel=9) as compressed:

@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use finder_icon_themes::apply::{self, ensure_something_to_do};
 use finder_icon_themes::config::{self, Config};
@@ -71,18 +71,18 @@ enum ServiceAction {
     Status,
 }
 
-fn expand(folder: &PathBuf) -> PathBuf {
+fn expand(folder: &Path) -> PathBuf {
     let raw = folder.to_string_lossy();
     if raw == "~" {
         finder_icon_themes::state::home()
     } else if let Some(rest) = raw.strip_prefix("~/") {
         finder_icon_themes::state::home().join(rest)
     } else {
-        folder.clone()
+        folder.to_path_buf()
     }
 }
 
-fn resolve(folder: &PathBuf) -> PathBuf {
+fn resolve(folder: &Path) -> PathBuf {
     let path = expand(folder);
     std::fs::canonicalize(&path).unwrap_or(path)
 }

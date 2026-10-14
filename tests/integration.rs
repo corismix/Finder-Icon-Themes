@@ -327,7 +327,7 @@ fn daemon_iconises_a_repo_created_under_a_watch_root() {
     let sandbox = Sandbox::new("daemon");
     let root = sandbox.path("code");
     fs::create_dir_all(&root).unwrap();
-    sandbox.write_config(&[root.clone()]);
+    sandbox.write_config(std::slice::from_ref(&root));
 
     let mut child = sandbox
         .command()
@@ -520,7 +520,7 @@ fn watcher_filters_churn_and_repairs_saves_and_moves() {
     fs::create_dir(repo.join("src")).unwrap();
     let file = repo.join("src/a.ts");
     fs::write(&file, "initial").unwrap();
-    sandbox.write_config(&[repo.clone()]);
+    sandbox.write_config(std::slice::from_ref(&repo));
     let mut child = sandbox
         .command()
         .arg("watch")
@@ -703,4 +703,64 @@ fn watcher_bounds_existing_launchd_logs_before_config_errors() {
             .len(),
         2 * 1024 * 1024
     );
+}
+
+#[test]
+fn ambiguous_legacy_and_interrupted_ownership_is_retained() {
+    let sandbox = Sandbox::new("ambiguous");
+    let repo = fs::canonicalize(sandbox.git_repo("project")).unwrap();
+    let file = repo.join("a.ts");
+    fs::write(&file, "").unwrap();
+    assert!(sandbox
+        .run(&["apply", repo.to_str().unwrap()])
+        .status
+        .success());
+    let journal = sandbox.path("state/state.json");
+    let mut state = sandbox.journal();
+    // Simulate the durable intent left if interrupted between AppKit and the
+    // fingerprint checkpoint. Its custom icon must not be assumed to be ours.
+    let record = &mut state["entries"][file.to_str().unwrap()];
+    record.as_object_mut().unwrap().remove("p");
+    record["pending"] = true.into();
+    fs::write(&journal, state.to_string()).unwrap();
+    let original = finder_icon_themes::macos::icon_fingerprint(&file).unwrap();
+    assert!(sandbox
+        .run(&["apply", repo.to_str().unwrap()])
+        .status
+        .success());
+    let cleanup = sandbox.run(&["clean"]);
+    assert!(!cleanup.status.success());
+    assert!(journal.exists());
+    assert!(sandbox.path("state/cache").exists());
+    assert!(sandbox.journal()["entries"][file.to_str().unwrap()].is_object());
+    assert_eq!(
+        finder_icon_themes::macos::icon_fingerprint(&file).unwrap(),
+        original
+    );
+    // Legacy records have the same ambiguity and must remain recoverable.
+    let mut state = sandbox.journal();
+    state["entries"][file.to_str().unwrap()]
+        .as_object_mut()
+        .unwrap()
+        .remove("pending");
+    fs::write(&journal, state.to_string()).unwrap();
+    assert!(!sandbox
+        .run(&["undo", repo.to_str().unwrap()])
+        .status
+        .success());
+    assert!(sandbox.journal()["entries"][file.to_str().unwrap()].is_object());
+}
+
+#[test]
+fn git_ignore_policy_checks_nested_repository_rules() {
+    let sandbox = Sandbox::new("nested-policy");
+    let repo = sandbox.git_repo("project");
+    let nested = sandbox.git_repo("project/nested");
+    fs::write(nested.join(".gitignore"), "ignored.ts\n").unwrap();
+    fs::write(nested.join("ignored.ts"), "").unwrap();
+    fs::write(nested.join("source.ts"), "").unwrap();
+    let output = sandbox.run(&["preview", repo.to_str().unwrap(), "--respect-gitignore"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("source.ts"));
+    assert!(!stdout(&output).contains("ignored.ts"));
 }

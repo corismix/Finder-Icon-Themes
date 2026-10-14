@@ -156,7 +156,7 @@ pub fn apply_candidates(
             dirty = true;
             prev = None;
         }
-        let custom = macos::has_custom_icon(&item.path);
+        let custom = macos::has_custom_icon_of(&item.path, item.directory);
         if custom && prev.is_none() {
             report.custom_skipped += 1;
             continue;
@@ -164,7 +164,7 @@ pub fn apply_candidates(
         if custom {
             let record = prev.as_ref().unwrap();
             if let Some(expected) = &record.payload {
-                if macos::icon_fingerprint(&item.path)?.as_ref() != Some(expected) {
+                if &macos::fingerprint_payload(&item.path, item.directory)? != expected {
                     // Keep the record as evidence, but never overwrite a manual replacement.
                     report.custom_skipped += 1;
                     continue;
@@ -185,7 +185,7 @@ pub fn apply_candidates(
         let revision = png.file_stem().unwrap().to_string_lossy().into_owned();
         if custom
             && prev.as_ref().is_some_and(|p| {
-                p.id == item.id && p.revision.as_ref().map_or(true, |r| r == &revision)
+                p.id == item.id && p.revision.as_ref().is_none_or(|r| r == &revision)
             })
         {
             report.unchanged += 1;
@@ -234,7 +234,7 @@ pub fn apply_candidates(
             match macos::set_icon(&item.path, Some(png)) {
                 Ok(true) => {
                     report.applied += 1;
-                    if let Ok(Some(payload)) = macos::icon_fingerprint(&item.path) {
+                    if let Ok(payload) = macos::fingerprint_payload(&item.path, item.directory) {
                         let record = state.entries.get_mut(&key).unwrap();
                         record.payload = Some(payload);
                         record.pending = false;
@@ -247,7 +247,7 @@ pub fn apply_candidates(
                     report.failed += 1;
                     // Keep intent if the API partly succeeded; ownership must
                     // not be silently discarded on a reported failure.
-                    if !macos::has_custom_icon(&item.path) {
+                    if !macos::has_custom_icon_of(&item.path, item.directory) {
                         match previous {
                             Some(p) => {
                                 state.insert(key, p);
@@ -347,9 +347,9 @@ pub fn remove_keys(keys: Vec<String>, state: &mut State) -> Result<UndoReport> {
                 report.failed += 1;
                 continue;
             }
-            if macos::has_custom_icon(path) {
-                match macos::icon_fingerprint(path) {
-                    Ok(Some(p)) if record.payload.as_ref() == Some(&p) && !record.pending => (),
+            if macos::has_custom_icon_of(path, record.directory) {
+                match macos::fingerprint_payload(path, record.directory) {
+                    Ok(p) if record.payload.as_ref() == Some(&p) && !record.pending => (),
                     _ => {
                         report.failed += 1;
                         continue;

@@ -1,0 +1,307 @@
+{
+  "baseline": {
+    "runs": [
+      {
+        "initial": {
+          "seconds": 12.269096,
+          "writes": 5,
+          "serialized_bytes": 509816,
+          "journal_bytes": 144268
+        },
+        "noop": [
+          {
+            "seconds": 0.043672,
+            "writes": 1,
+            "serialized_bytes": 144268
+          },
+          {
+            "seconds": 0.042713,
+            "writes": 1,
+            "serialized_bytes": 144268
+          },
+          {
+            "seconds": 0.04253,
+            "writes": 1,
+            "serialized_bytes": 144268
+          }
+        ],
+        "atomic": {
+          "seconds": 0.04431,
+          "writes": 1,
+          "serialized_bytes": 144268
+        },
+        "undo": {
+          "seconds": 0.492066,
+          "writes": 1003,
+          "serialized_bytes": 72276574
+        }
+      },
+      {
+        "initial": {
+          "seconds": 10.274437,
+          "writes": 5,
+          "serialized_bytes": 509816,
+          "journal_bytes": 144268
+        },
+        "noop": [
+          {
+            "seconds": 0.041139,
+            "writes": 1,
+            "serialized_bytes": 144268
+          },
+          {
+            "seconds": 0.036333,
+            "writes": 1,
+            "serialized_bytes": 144268
+          },
+          {
+            "seconds": 0.036424,
+            "writes": 1,
+            "serialized_bytes": 144268
+          }
+        ],
+        "atomic": {
+          "seconds": 0.037205,
+          "writes": 1,
+          "serialized_bytes": 144268
+        },
+        "undo": {
+          "seconds": 0.455651,
+          "writes": 1003,
+          "serialized_bytes": 72276574
+        }
+      },
+      {
+        "initial": {
+          "seconds": 9.133281,
+          "writes": 5,
+          "serialized_bytes": 509816,
+          "journal_bytes": 144268
+        },
+        "noop": [
+          {
+            "seconds": 0.040273,
+            "writes": 1,
+            "serialized_bytes": 144268
+          },
+          {
+            "seconds": 0.03483,
+            "writes": 1,
+            "serialized_bytes": 144268
+          },
+          {
+            "seconds": 0.034879,
+            "writes": 1,
+            "serialized_bytes": 144268
+          }
+        ],
+        "atomic": {
+          "seconds": 0.034293,
+          "writes": 1,
+          "serialized_bytes": 144268
+        },
+        "undo": {
+          "seconds": 0.417868,
+          "writes": 1003,
+          "serialized_bytes": 72276574
+        }
+      }
+    ],
+    "large_journal_bytes": 13269018,
+    "large_empty_apply": [
+      {
+        "seconds": 0.067129,
+        "writes": 1,
+        "serialized_bytes": 13269038
+      },
+      {
+        "seconds": 0.062542,
+        "writes": 1,
+        "serialized_bytes": 13269038
+      },
+      {
+        "seconds": 0.062948,
+        "writes": 1,
+        "serialized_bytes": 13269038
+      }
+    ],
+    "binary_bytes": 4627904,
+    "watcher": {
+      "excluded_writes": 2,
+      "excluded_bytes": 13930,
+      "content_writes": 2,
+      "content_bytes": 13930,
+      "continuous_events": {
+        "applied_during_storm": false,
+        "seconds": 8.041
+      }
+    }
+  },
+  "current": {
+    "runs": [
+      {
+        "initial": {
+          "seconds": 10.810011,
+          "writes": 9,
+          "serialized_bytes": 1390843,
+          "journal_bytes": 285549
+        },
+        "noop": [
+          {
+            "seconds": 0.062924,
+            "writes": 0,
+            "serialized_bytes": 0
+          },
+          {
+            "seconds": 0.061321,
+            "writes": 0,
+            "serialized_bytes": 0
+          },
+          {
+            "seconds": 0.060882,
+            "writes": 0,
+            "serialized_bytes": 0
+          }
+        ],
+        "atomic": {
+          "seconds": 0.109336,
+          "writes": 2,
+          "serialized_bytes": 571042
+        },
+        "undo": {
+          "seconds": 0.309787,
+          "writes": 5,
+          "serialized_bytes": 419302
+        }
+      },
+      {
+        "initial": {
+          "seconds": 11.250098,
+          "writes": 9,
+          "serialized_bytes": 1390843,
+          "journal_bytes": 285549
+        },
+        "noop": [
+          {
+            "seconds": 0.063261,
+            "writes": 0,
+            "serialized_bytes": 0
+          },
+          {
+            "seconds": 0.061024,
+            "writes": 0,
+            "serialized_bytes": 0
+          },
+          {
+            "seconds": 0.061308,
+            "writes": 0,
+            "serialized_bytes": 0
+          }
+        ],
+        "atomic": {
+          "seconds": 0.108418,
+          "writes": 2,
+          "serialized_bytes": 571042
+        },
+        "undo": {
+          "seconds": 0.313086,
+          "writes": 5,
+          "serialized_bytes": 419302
+        }
+      },
+      {
+        "initial": {
+          "seconds": 11.215649,
+          "writes": 9,
+          "serialized_bytes": 1390843,
+          "journal_bytes": 285549
+        },
+        "noop": [
+          {
+            "seconds": 0.062133,
+            "writes": 0,
+            "serialized_bytes": 0
+          },
+          {
+            "seconds": 0.060459,
+            "writes": 0,
+            "serialized_bytes": 0
+          },
+          {
+            "seconds": 0.061143,
+            "writes": 0,
+            "serialized_bytes": 0
+          }
+        ],
+        "atomic": {
+          "seconds": 0.110436,
+          "writes": 2,
+          "serialized_bytes": 571042
+        },
+        "undo": {
+          "seconds": 0.299835,
+          "writes": 5,
+          "serialized_bytes": 419302
+        }
+      }
+    ],
+    "large_journal_bytes": 13163618,
+    "large_empty_apply": [
+      {
+        "seconds": 0.074606,
+        "writes": 0,
+        "serialized_bytes": 0
+      },
+      {
+        "seconds": 0.072791,
+        "writes": 0,
+        "serialized_bytes": 0
+      },
+      {
+        "seconds": 0.07321,
+        "writes": 0,
+        "serialized_bytes": 0
+      }
+    ],
+    "binary_bytes": 2693616,
+    "watcher": {
+      "excluded_writes": 0,
+      "excluded_bytes": 0,
+      "content_writes": 0,
+      "content_bytes": 0,
+      "continuous_events": {
+        "applied_during_storm": true,
+        "seconds": 5.11
+      }
+    }
+  },
+  "artwork": {
+    "kept_svgs": 857,
+    "byte_identical": true,
+    "old_archive_bytes": 527762,
+    "new_archive_bytes": 309027
+  },
+  "scanner_probe": {
+    "baseline_full_100_seconds": 0.083457875,
+    "current_full_100_seconds": 0.270032625,
+    "current_incremental_100_seconds": 0.001710833,
+    "full_candidates_per_pass": 1002,
+    "incremental_candidates_per_pass": 1
+  },
+  "render_probe": {
+    "compared_pngs": 857,
+    "all_bytes_identical": true,
+    "width": 256
+  },
+  "method": {
+    "date": "2026-10-15",
+    "baseline_commit": "a89c81d",
+    "apply_fixture": "1000 TypeScript files and two folders; three fresh fixtures per version, three no-op repeats per fixture",
+    "write_counter": "Temporary release-source instrumentation at save_state recorded minified JSON byte lengths; no instrumentation committed",
+    "watcher_fixture": "50 TypeScript files plus .git and node_modules; 500 excluded writes, one content edit, then 50ms content edits during creation of one new file",
+    "large_journal": "105400 synthetic legacy entries under temporary absent paths; empty apply does not operate on those paths",
+    "isolation": "Temporary state, HOME, Git config, XDG config, repositories, theme rendering and build directories; installed service and existing themed files untouched",
+    "timing_limits": "Sequential versions on the same Mac, warm filesystem caches and background activity not controlled; small samples; not physical APFS write/allocation measurements"
+  },
+  "final_release_binary_bytes": 2710144
+}

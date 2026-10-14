@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-pub use imp::{has_custom_icon, icon_fingerprint, set_icon};
+pub use imp::{
+    fingerprint_payload, has_custom_icon, has_custom_icon_of, icon_fingerprint, set_icon,
+};
 
 /// Does this item already carry a custom icon (ours or anyone else's)?
 pub fn exists(path: &Path) -> bool {
@@ -71,19 +73,40 @@ mod imp {
         path.is_dir() && path.join("Icon\r").exists()
     }
 
+    pub fn has_custom_icon_of(path: &Path, directory: bool) -> bool {
+        finder_info_flag(path) || (directory && path.join("Icon\r").exists())
+    }
+
     /// Fingerprint only icon payload, not other Finder metadata. Failure is
     /// conservative: callers retain ownership and never clear an unknown icon.
     pub fn icon_fingerprint(path: &Path) -> Result<Option<String>> {
         if !has_custom_icon(path) {
             return Ok(None);
         }
-        let resource = if path.is_dir() {
-            path.join("Icon\r")
-        } else {
-            path.to_path_buf()
-        };
+        Ok(Some(fingerprint_payload(path, path.is_dir())?))
+    }
+
+    /// The caller already knows the item kind and custom flag. Read typical
+    /// icon forks in one syscall without a per-item heap buffer allocation.
+    pub fn fingerprint_payload(path: &Path, directory: bool) -> Result<String> {
+        let folder = directory.then(|| path.join("Icon\r"));
+        let resource = folder.as_deref().unwrap_or(path);
         let c_path = CString::new(resource.as_os_str().as_bytes())?;
         let attr = c"com.apple.ResourceFork";
+        let mut small = [0u8; 32 * 1024];
+        let read = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(),
+                attr.as_ptr(),
+                small.as_mut_ptr().cast(),
+                small.len(),
+                0,
+                0,
+            )
+        };
+        if read >= 0 {
+            return Ok(format!("{:x}", Sha256::digest(&small[..read as usize])));
+        }
         let size = unsafe {
             libc::getxattr(
                 c_path.as_ptr(),
@@ -115,7 +138,7 @@ mod imp {
             "Icon payload changed while reading {}",
             path.display()
         );
-        Ok(Some(format!("{:x}", Sha256::digest(&bytes))))
+        Ok(format!("{:x}", Sha256::digest(&bytes)))
     }
 
     fn finder_info_flag(path: &Path) -> bool {
@@ -151,6 +174,12 @@ mod imp {
         bail!("Custom icons require macOS.")
     }
 
+    pub fn fingerprint_payload(_path: &Path, _directory: bool) -> Result<String> {
+        bail!("Custom icons require macOS.")
+    }
+    pub fn has_custom_icon_of(path: &Path, directory: bool) -> bool {
+        directory && path.join("Icon\r").exists()
+    }
     pub fn icon_fingerprint(_path: &Path) -> Result<Option<String>> {
         Ok(None)
     }

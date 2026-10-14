@@ -188,6 +188,9 @@ pub fn stop() -> Result<()> {
     }
     let _ = launchctl(&["disable", &service_target()]);
     bootout();
+    if is_loaded() {
+        bail!("Could not stop {LABEL}; icons and ownership were left intact.");
+    }
     Ok(())
 }
 

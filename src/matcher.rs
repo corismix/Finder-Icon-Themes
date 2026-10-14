@@ -36,14 +36,14 @@ pub fn find_icon_policy(
             None
         }
         .or_else(|| manifest.folder_names.get(&lower))
-        .or_else(|| {
+        .or({
             if is_root && fallbacks {
                 manifest.root_folder.as_ref()
             } else {
                 None
             }
         })
-        .or_else(|| {
+        .or({
             if fallbacks {
                 manifest.folder.as_ref()
             } else {
@@ -65,7 +65,7 @@ pub fn find_icon_policy(
                 id = manifest.file_extensions.get(&lower[1..]).cloned();
             }
         }
-        id.or_else(|| {
+        id.or({
             if fallbacks {
                 manifest.file.clone()
             } else {

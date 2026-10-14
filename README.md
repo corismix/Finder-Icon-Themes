@@ -157,6 +157,8 @@ finder-icon-themes/
 
 ## Development
 
+See [implementation results and benchmarks](docs/performance-and-storage-results.md) for verified behaviour, measured trade-offs and remaining ownership limits.
+
 ```sh
 cargo test
 ```

@@ -129,8 +129,7 @@ pub fn ensure_global_rule(state: &mut State) -> Result<()> {
         let owned = state.excludes.global_owned
             && state.excludes.global_file.as_ref() == Some(&file)
             && before.contains(&format!("{MARKER}\n{RULE}\n"));
-        state.excludes.global_file = Some(file);
-        state.excludes.global_owned = owned;
+        state.excludes.set_file(file, owned);
         return Ok(());
     }
     if let Some(parent) = file.parent() {
@@ -143,8 +142,7 @@ pub fn ensure_global_rule(state: &mut State) -> Result<()> {
         "\n"
     };
     let block = format!("{separator}{MARKER}\n{RULE}\n");
-    state.excludes.global_file = Some(file.clone());
-    state.excludes.global_owned = true;
+    state.excludes.set_file(file.clone(), true);
     crate::state::save_state(&crate::state::state_paths().state, state)?;
     let mut handle = fs::OpenOptions::new()
         .create(true)
@@ -153,40 +151,110 @@ pub fn ensure_global_rule(state: &mut State) -> Result<()> {
         .with_context(|| format!("Cannot open {}", file.display()))?;
     std::io::Write::write_all(&mut handle, block.as_bytes())
         .with_context(|| format!("Cannot write {}", file.display()))?;
-    state.excludes.global_file = Some(file);
-    state.excludes.global_owned = true;
+    state.excludes.set_file(file, true);
     Ok(())
 }
 
 /// Remove the rule only if this tool added it.
 pub fn remove_global_rule(state: &mut State) -> Result<()> {
-    let (file, owned) = (
-        state.excludes.global_file.clone(),
-        state.excludes.global_owned,
-    );
-    if owned {
-        if let Some(file) = file {
-            let text = match fs::read_to_string(&file) {
-                Ok(s) => s,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(e) => return Err(e).context("Cannot read owned global excludes"),
-            };
-            {
-                let block = format!("{MARKER}\n{RULE}\n");
-                if text.contains(&block) {
-                    fs::write(&file, text.replace(&block, ""))
-                        .with_context(|| format!("Cannot write {}", file.display()))?;
-                }
-            }
+    let mut files = state.excludes.previous_owned.clone();
+    if state.excludes.global_owned {
+        if let Some(file) = &state.excludes.global_file {
+            files.push(file.clone());
         }
     }
+    files.sort();
+    files.dedup();
+    for file in files {
+        let text = match fs::read_to_string(&file) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).context("Cannot read owned global excludes"),
+        };
+        let block = format!("{MARKER}\n{RULE}\n");
+        if text.contains(&block) {
+            fs::write(&file, text.replace(&block, ""))
+                .with_context(|| format!("Cannot write {}", file.display()))?;
+        }
+    }
+    // Reset ownership only after all removals succeed; retry is idempotent.
     state.excludes = Default::default();
     Ok(())
+}
+
+/// Let Git evaluate its own ignore/negation/global/worktree rules. `--others`
+/// preserves tracked files even if a pattern matches them; `--directory`
+/// collapses wholly ignored trees instead of enumerating build outputs.
+/// Each submodule/worktree is queried independently by the scanner.
+pub fn ignored_paths(repo: &Path) -> Result<Vec<PathBuf>> {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStringExt;
+    use std::process::Stdio;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut bytes = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .unwrap()
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() > 16 * 1024 * 1024 {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("Git ignore listing exceeded its bound or failed; policy left unapplied");
+    }
+    anyhow::ensure!(
+        child.wait()?.success(),
+        "Cannot evaluate Git ignore policy at {}",
+        repo.display()
+    );
+    Ok(bytes
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let p = p.strip_suffix(b"/").unwrap_or(p);
+            repo.join(std::ffi::OsString::from_vec(p.to_vec()))
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_global_file_and_removal_errors_retain_ownership() {
+        let dir = std::env::temp_dir().join(format!("fit-exclude-switch-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old-ignore");
+        let new = dir.join("user-ignore");
+        fs::write(&old, format!("{MARKER}\n{RULE}\n")).unwrap();
+        fs::write(&new, "user rules\nIcon?\n").unwrap();
+        let mut state = State::default();
+        state.excludes.set_file(old.clone(), true);
+        state.excludes.set_file(new.clone(), false);
+        assert_eq!(state.excludes.previous_owned, vec![old.clone()]);
+        remove_global_rule(&mut state).unwrap();
+        assert_eq!(fs::read_to_string(old).unwrap(), "");
+        assert_eq!(fs::read_to_string(new).unwrap(), "user rules\nIcon?\n");
+        state.excludes.previous_owned.push(dir.clone()); // unreadable as text
+        assert!(remove_global_rule(&mut state).is_err());
+        assert_eq!(state.excludes.previous_owned, vec![dir.clone()]);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn discovers_repos_and_stops_at_their_root() {
@@ -246,53 +314,4 @@ mod tests {
         assert!(!state.excludes.global_owned);
         let _ = fs::remove_dir_all(&dir);
     }
-}
-
-/// Let Git evaluate its own ignore/negation/global/worktree rules. `--others`
-/// preserves tracked files even if a pattern matches them; `--directory`
-/// collapses wholly ignored trees instead of enumerating build outputs.
-/// Each submodule/worktree is queried independently by the scanner.
-pub fn ignored_paths(repo: &Path) -> Result<Vec<PathBuf>> {
-    use std::io::Read;
-    use std::os::unix::ffi::OsStringExt;
-    use std::process::Stdio;
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args([
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-            "-z",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let mut bytes = Vec::new();
-    let read = child
-        .stdout
-        .take()
-        .unwrap()
-        .take(16 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes);
-    if read.is_err() || bytes.len() > 16 * 1024 * 1024 {
-        let _ = child.kill();
-        let _ = child.wait();
-        anyhow::bail!("Git ignore listing exceeded its bound or failed; policy left unapplied");
-    }
-    anyhow::ensure!(
-        child.wait()?.success(),
-        "Cannot evaluate Git ignore policy at {}",
-        repo.display()
-    );
-    Ok(bytes
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| {
-            let p = p.strip_suffix(b"/").unwrap_or(p);
-            repo.join(std::ffi::OsString::from_vec(p.to_vec()))
-        })
-        .collect())
 }

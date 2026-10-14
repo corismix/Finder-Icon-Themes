@@ -21,7 +21,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime};
 
-const QUEUE: usize = 1024;
+const QUEUE: usize = 256;
+const MAX_EVENT_PATHS: usize = 64;
 const MAX_PATHS: usize = 2048;
 const QUIET: Duration = Duration::from_millis(500);
 const MAX_DELAY: Duration = Duration::from_secs(5);
@@ -165,7 +166,7 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
     let callback_config = config.clone();
     let mut watcher = recommended_watcher(move |result: notify::Result<Event>| {
         let mut event = match result {
-            Ok(e) if e.paths.len() <= MAX_PATHS => e,
+            Ok(e) if e.paths.len() <= MAX_EVENT_PATHS => e,
             _ => {
                 overflow.store(true, Ordering::Release);
                 let _ = tx.try_send(Event::new(EventKind::Other));

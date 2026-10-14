@@ -50,6 +50,23 @@ pub struct Excludes {
     pub global_file: Option<PathBuf>,
     #[serde(rename = "go", default)]
     pub global_owned: bool,
+    /// Keep old owned files if Git's global destination changes between runs.
+    #[serde(rename = "old", default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_owned: Vec<PathBuf>,
+}
+
+impl Excludes {
+    pub fn set_file(&mut self, file: PathBuf, owned: bool) {
+        if self.global_file.as_ref() != Some(&file) && self.global_owned {
+            if let Some(old) = &self.global_file {
+                if !self.previous_owned.contains(old) {
+                    self.previous_owned.push(old.clone());
+                }
+            }
+        }
+        self.global_file = Some(file);
+        self.global_owned = owned;
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

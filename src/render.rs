@@ -27,9 +27,23 @@ pub fn png_for(theme: &Theme, source: &str, cache_dir: &Path) -> Result<PathBuf>
         }
     }
     let svg = theme.svg_bytes(source)?;
+    #[cfg(not(feature = "extended-svg"))]
+    {
+        let text = std::str::from_utf8(&svg).context("SVG must be UTF-8")?;
+        anyhow::ensure!(
+            !["<text", ":text", "<image", ":image"]
+                .iter()
+                .any(|tag| text.contains(tag)),
+            "Icon {source} requires SVG text/raster support; rebuild with --features extended-svg"
+        );
+    }
     let mut hasher = Sha256::new();
     hasher.update(&svg);
     hasher.update(TARGET_WIDTH.to_le_bytes());
+    #[cfg(feature = "extended-svg")]
+    if svg.starts_with(&[0x1f, 0x8b]) || svg.windows(4).any(|w| w == b"text") {
+        hasher.update(b"extended-text-v1");
+    }
     let file = cache_dir.join(format!("{}.png", hex(&hasher.finalize())));
     if theme.immutable() {
         let mut memo = theme.prepared.borrow_mut();
@@ -41,22 +55,26 @@ pub fn png_for(theme: &Theme, source: &str, cache_dir: &Path) -> Result<PathBuf>
     if file.is_file() {
         return Ok(file);
     }
-    #[cfg(not(feature = "extended-svg"))]
-    {
-        let text = std::str::from_utf8(&svg).context("SVG must be UTF-8")?;
-        anyhow::ensure!(
-            !["<text", ":text", "<image", ":image"]
-                .iter()
-                .any(|tag| text.contains(tag)),
-            "Icon {source} requires SVG text/raster support; rebuild with --features extended-svg"
-        );
-    }
     fs::create_dir_all(cache_dir)
         .with_context(|| format!("Cannot create {}", cache_dir.display()))?;
-    let tree = usvg::Tree::from_data(&svg, &usvg::Options::default())
+    #[allow(unused_mut)]
+    let mut options = usvg::Options::default();
+    #[cfg(feature = "extended-svg")]
+    if svg.starts_with(&[0x1f, 0x8b]) || svg.windows(4).any(|w| w == b"text") {
+        static FONTS: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
+            std::sync::OnceLock::new();
+        options.fontdb = FONTS
+            .get_or_init(|| {
+                let mut db = usvg::fontdb::Database::new();
+                db.load_system_fonts();
+                std::sync::Arc::new(db)
+            })
+            .clone();
+    }
+    let tree = usvg::Tree::from_data(&svg, &options)
         .with_context(|| format!("Cannot parse icon {source}"))?;
     let width = tree.size().width();
-    if !(width > 0.0) {
+    if !width.is_finite() || width <= 0.0 {
         bail!("Icon {source} has no width");
     }
     let scale = TARGET_WIDTH / width;
@@ -107,7 +125,7 @@ pub fn prune_cache(cache_dir: &Path, max_entries: usize, max_bytes: u64) -> Resu
         let name = name.to_string_lossy();
         if name.len() != 68
             || !name.ends_with(".png")
-            || !name[..64].bytes().all(|b| b.is_ascii_hexdigit())
+            || !name.as_bytes()[..64].iter().all(|b| b.is_ascii_hexdigit())
         {
             continue;
         }
@@ -134,6 +152,30 @@ pub fn prune_cache(cache_dir: &Path, max_entries: usize, max_bytes: u64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disk_text_theme_requires_extended_renderer_and_renders_when_enabled() {
+        let dir = std::env::temp_dir().join(format!("fit-disk-text-{}", std::process::id()));
+        fs::create_dir_all(dir.join("dist")).unwrap();
+        fs::create_dir_all(dir.join("icons")).unwrap();
+        fs::write(
+            dir.join("dist/material-icons.json"),
+            r#"{"file":"file","iconDefinitions":{"file":{"iconPath":"../icons/file.svg"}}}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("icons/file.svg"), r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><text x="0" y="24" font-size="20" font-family="Arial">X</text></svg>"#).unwrap();
+        let theme = crate::theme::load("material", Some(&dir)).unwrap();
+        let result = png_for(&theme, "../icons/file.svg", &dir.join("cache"));
+        #[cfg(not(feature = "extended-svg"))]
+        assert!(result.unwrap_err().to_string().contains("extended-svg"));
+        #[cfg(feature = "extended-svg")]
+        assert!(tiny_skia::Pixmap::load_png(result.unwrap())
+            .unwrap()
+            .pixels()
+            .iter()
+            .any(|p| p.alpha() > 0));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn every_shipped_resource_renders_at_256() {
         let cache = std::env::temp_dir().join(format!("fit-render-all-{}", std::process::id()));
