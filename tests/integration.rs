@@ -525,7 +525,7 @@ fn watcher_filters_churn_and_repairs_saves_and_moves() {
         .command()
         .arg("watch")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
         .spawn()
         .unwrap();
     struct Stop<'a>(&'a mut std::process::Child);
@@ -565,7 +565,11 @@ fn watcher_filters_churn_and_repairs_saves_and_moves() {
     {
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(sandbox.journal()["entries"][moved.to_str().unwrap()].is_object());
+    assert!(
+        sandbox.journal()["entries"][moved.to_str().unwrap()].is_object(),
+        "{}",
+        sandbox.journal()
+    );
 }
 
 #[test]
@@ -679,4 +683,24 @@ fn git_ignore_policy_preserves_tracked_files_negations_and_worktrees() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(!stdout(&output).contains("ignored.ts"));
     assert!(stdout(&output).contains("keep.ts"));
+}
+
+#[test]
+fn watcher_bounds_existing_launchd_logs_before_config_errors() {
+    let sandbox = Sandbox::new("log-bound");
+    fs::create_dir_all(sandbox.path("state")).unwrap();
+    fs::write(sandbox.path("state/watch.log"), vec![b'x'; 3 * 1024 * 1024]).unwrap();
+    fs::write(sandbox.path("config.toml"), "invalid toml = [").unwrap();
+    let output = sandbox.run(&["watch"]);
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::metadata(sandbox.path("state/watch.log")).unwrap().len(),
+        0
+    );
+    assert_eq!(
+        fs::metadata(sandbox.path("state/watch.log.1"))
+            .unwrap()
+            .len(),
+        2 * 1024 * 1024
+    );
 }

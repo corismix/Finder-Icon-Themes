@@ -47,10 +47,7 @@ pub fn affected<'a>(candidates: &'a [Candidate], state: &State) -> Vec<&'a Candi
             let Some(record) = state.entries.get(&item.path.to_string_lossy().into_owned()) else {
                 return true;
             };
-            match identity(&item.path) {
-                Ok(current) => record.identity != current || record.id != item.id,
-                Err(_) => true,
-            }
+            record.identity != item.identity || record.id != item.id
         })
         .collect()
 }
@@ -69,7 +66,7 @@ pub fn apply(
         .collect();
     let mut moved = false;
     for item in &candidates {
-        let current = identity(&item.path)?;
+        let current = item.identity.clone();
         if let Some(old) = identities.get(&current) {
             if old != &item.path.to_string_lossy() && !Path::new(old).exists() {
                 moved |= transfer_move(Path::new(old), &item.path, state)?;
@@ -113,7 +110,8 @@ pub fn transfer_move(from: &Path, to: &Path, state: &mut State) -> Result<bool> 
         if state.entries.contains_key(&target) {
             continue;
         }
-        let record = state.remove(&key).unwrap();
+        let mut record = state.remove(&key).unwrap();
+        record.missing_since = None;
         state.insert(target, record);
         dirty = true;
     }
@@ -135,7 +133,7 @@ pub fn apply_candidates(
     let mut png_cache: HashMap<String, PathBuf> = HashMap::new();
     for item in candidates {
         let key = item.path.to_string_lossy().into_owned();
-        let current = identity(&item.path)?;
+        let current = item.identity.clone();
         if !state.entries.contains_key(&key) {
             if let Some(old) = state.identities.get(&current).cloned() {
                 if old != key
@@ -145,6 +143,11 @@ pub fn apply_candidates(
                 {
                     dirty |= transfer_move(Path::new(&old), &item.path, state)?;
                 }
+            }
+        }
+        if let Some(record) = state.entries.get_mut(&key) {
+            if record.identity == current && record.missing_since.take().is_some() {
+                dirty = true;
             }
         }
         let mut prev = state.entries.get(&key).cloned();
@@ -213,6 +216,7 @@ pub fn apply_candidates(
                 revision: Some(revision.clone()),
                 payload: previous.as_ref().and_then(|p| p.payload.clone()),
                 pending: true,
+                missing_since: None,
             };
             state.insert(key.clone(), record);
             pending.push((key, previous, png, item));
@@ -235,6 +239,8 @@ pub fn apply_candidates(
                         record.payload = Some(payload);
                         record.pending = false;
                         dirty = true;
+                    } else {
+                        report.failed += 1;
                     }
                 }
                 _ => {
@@ -262,6 +268,9 @@ pub fn apply_candidates(
     }
     if dirty {
         save_state(&state_paths().state, state)?;
+    }
+    if report.applied > 0 {
+        crate::render::prune_cache(cache_dir, 1024, 64 * 1024 * 1024)?;
     }
     Ok(report)
 }
@@ -389,8 +398,26 @@ pub fn prune(state: &mut State, within: Option<&Path>) -> Result<()> {
     if keys.is_empty() {
         return Ok(());
     }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let mut dirty = false;
     for key in keys {
-        state.remove(&key);
+        let record = state.entries.get_mut(&key).unwrap();
+        match record.missing_since {
+            Some(since) if now.saturating_sub(since) >= 30 => {
+                state.remove(&key);
+                dirty = true;
+            }
+            None => {
+                record.missing_since = Some(now);
+                dirty = true;
+            }
+            _ => (),
+        }
+    }
+    if !dirty {
+        return Ok(());
     }
     if state.entries.is_empty() {
         crate::git::remove_global_rule(state)?;

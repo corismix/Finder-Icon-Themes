@@ -15,7 +15,7 @@ pub fn plist_path() -> PathBuf {
 }
 
 fn log_path() -> PathBuf {
-    home().join(".local/state/finder-icon-themes/watch.log")
+    crate::state::state_paths().base.join("watch.log")
 }
 
 fn uid() -> u32 {
@@ -200,4 +200,31 @@ fn guard_non_root() -> Result<()> {
 
 pub fn status() -> Result<bool> {
     Ok(is_loaded())
+}
+
+/// Launchd keeps its log descriptor open. Truncate in place, retaining a bounded
+/// tail in one backup instead of renaming the active inode underneath launchd.
+pub fn bound_log() -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    const LIMIT: u64 = 2 * 1024 * 1024;
+    let path = log_path();
+    let meta = match path.symlink_metadata() {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() <= LIMIT {
+        return Ok(());
+    }
+    let mut file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+    file.seek(SeekFrom::End(-(LIMIT as i64)))?;
+    let mut tail = Vec::new();
+    file.take(LIMIT).read_to_end(&mut tail)?;
+    let backup = path.with_extension("log.1");
+    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+    fs::write(&temp, tail)?;
+    fs::rename(temp, backup)?;
+    // Existing stderr/stdout descriptors continue writing this same file.
+    fs::OpenOptions::new().write(true).open(&path)?.set_len(0)?;
+    Ok(())
 }

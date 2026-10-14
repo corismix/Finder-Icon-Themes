@@ -21,6 +21,7 @@ pub struct Candidate {
     pub directory: bool,
     pub id: String,
     pub source: String,
+    pub identity: String,
 }
 
 pub fn skipped_name(name: &str) -> bool {
@@ -118,6 +119,19 @@ impl<'a> Policy<'a> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
+        self.match_candidate(path, manifest, &meta)
+    }
+    fn match_candidate(
+        &self,
+        path: &Path,
+        manifest: &Manifest,
+        meta: &fs::Metadata,
+    ) -> Result<Option<Candidate>> {
+        anyhow::ensure!(
+            path.to_str().is_some(),
+            "Cannot journal a non-UTF-8 path safely: {}",
+            path.display()
+        );
         let directory = meta.is_dir();
         if meta.file_type().is_symlink()
             || (!directory && !meta.is_file())
@@ -147,6 +161,7 @@ impl<'a> Policy<'a> {
             directory,
             id: m.id,
             source: m.source,
+            identity: crate::state::identity_of(meta),
         }))
     }
 }
@@ -235,11 +250,23 @@ pub fn collect_with_config(
                 bail!("Scan stopped at {MAX_ENTRIES} entries. Choose a smaller folder.");
             }
             let full = entry.path();
-            if !policy.allows(&full) {
+            // Parent safety was established when it entered the stack. Avoid
+            // rechecking every ancestor/marker for every child.
+            if !config_allows(root, &full, config)
+                || policy
+                    .ignored
+                    .values()
+                    .flatten()
+                    .any(|p| full.starts_with(p))
+                || (kind.is_dir() && opted_out(&full))
+            {
                 continue;
             }
-            if let Some(item) = policy.candidate(&full, manifest)? {
-                found.push(item);
+            if (kind.is_dir() && config.folders) || (kind.is_file() && config.files) {
+                let meta = full.symlink_metadata()?;
+                if let Some(item) = policy.match_candidate(&full, manifest, &meta)? {
+                    found.push(item);
+                }
             }
             if kind.is_dir() && !skips_contents(&name) {
                 stack.push(full);

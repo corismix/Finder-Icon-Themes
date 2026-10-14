@@ -157,6 +157,7 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
         );
     }
     let paths = state_paths();
+    crate::render::prune_cache(&paths.cache, 1024, 64 * 1024 * 1024)?;
     let (tx, rx) = sync_channel(QUEUE);
     let missed = Arc::new(AtomicBool::new(false));
     let overflow = missed.clone();
@@ -293,9 +294,18 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
             generation = version(&paths.state);
         }
         dirty = Dirty::default();
-        let first = match rx.recv() {
-            Ok(e) => e,
-            Err(_) => return Ok(()),
+        let first = loop {
+            crate::service::bound_log()?;
+            match rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(e) => break e,
+                Err(RecvTimeoutError::Timeout) => {
+                    if state.entries.values().any(|e| e.missing_since.is_some()) {
+                        break Event::new(EventKind::Other);
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            }
         };
         let deadline = Instant::now() + MAX_DELAY;
         dirty.event(first, &roots);

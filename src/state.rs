@@ -38,6 +38,8 @@ pub struct Entry {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub pending: bool,
+    #[serde(rename = "missing", default, skip_serializing_if = "Option::is_none")]
+    pub missing_since: Option<u64>,
 }
 
 /// The single global Git exclude rule we may own. We never touch a repo's
@@ -242,6 +244,7 @@ mod tests {
                 revision: None,
                 payload: None,
                 pending: false,
+                missing_since: None,
             },
         );
         save_state(&file, &state).unwrap();

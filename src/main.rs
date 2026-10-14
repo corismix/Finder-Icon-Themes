@@ -111,6 +111,9 @@ fn load_theme(config: &Config) -> Result<theme::Theme> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(&cli.command, Command::Watch) {
+        service::bound_log()?;
+    }
     let config = config::load()?;
     let paths = state_paths();
 

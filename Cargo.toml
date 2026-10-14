@@ -15,7 +15,7 @@ clap = { version = "4", features = ["derive"] }
 dirs = "7"
 flate2 = "1"
 notify = "8"
-resvg = "0.48"
+resvg = { version = "0.48", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -25,8 +25,12 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString"] }
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSImage"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSImage"] }
+
+[features]
+# For disk themes using SVG text, fonts, embedded raster images or SVGZ.
+extended-svg = ["resvg/text", "resvg/system-fonts", "resvg/memmap-fonts", "resvg/raster-images", "resvg/svgz"]
 
 [profile.release]
 lto = true

@@ -54,10 +54,9 @@ pub fn find_icon_policy(
     } else {
         let mut id = manifest.file_names.get(&lower).cloned();
         if id.is_none() {
-            let parts: Vec<&str> = lower.split('.').collect();
-            for index in 1..parts.len() {
-                let suffix = parts[index..].join(".");
-                if let Some(found) = manifest.file_extensions.get(&suffix) {
+            for (index, _) in lower.match_indices('.') {
+                let suffix = &lower[index + 1..];
+                if let Some(found) = manifest.file_extensions.get(suffix) {
                     id = Some(found.clone());
                     break;
                 }

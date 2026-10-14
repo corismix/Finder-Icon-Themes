@@ -87,6 +87,10 @@ pub fn repo_for(path: &Path) -> Option<PathBuf> {
 /// The ignore file git uses globally. Honours `core.excludesFile`, falling back
 /// to git's own default (`$XDG_CONFIG_HOME/git/ignore`).
 pub fn global_excludes_file() -> PathBuf {
+    static FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    FILE.get_or_init(resolve_global_excludes_file).clone()
+}
+fn resolve_global_excludes_file() -> PathBuf {
     if let Ok(output) = Command::new("git")
         .args(["config", "--global", "--get", "core.excludesFile"])
         .output()
@@ -139,6 +143,9 @@ pub fn ensure_global_rule(state: &mut State) -> Result<()> {
         "\n"
     };
     let block = format!("{separator}{MARKER}\n{RULE}\n");
+    state.excludes.global_file = Some(file.clone());
+    state.excludes.global_owned = true;
+    crate::state::save_state(&crate::state::state_paths().state, state)?;
     let mut handle = fs::OpenOptions::new()
         .create(true)
         .append(true)

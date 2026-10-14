@@ -12,13 +12,17 @@ pub fn exists(path: &Path) -> bool {
 #[cfg(target_os = "macos")]
 mod imp {
     use anyhow::Result;
+    use objc2::rc::Retained;
     use objc2::AnyThread;
     use objc2_app_kit::{NSImage, NSWorkspace, NSWorkspaceIconCreationOptions};
     use objc2_foundation::NSString;
     use sha2::{Digest, Sha256};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    thread_local! { static IMAGES: RefCell<VecDeque<(PathBuf, Retained<NSImage>)>> = const { RefCell::new(VecDeque::new()) }; }
 
     /// `NSWorkspace.shared.setIcon(_:forFile:options:)`. `None` clears the icon.
     ///
@@ -30,13 +34,23 @@ mod imp {
             let ns_path = NSString::from_str(&path.to_string_lossy());
             let image = match icon {
                 None => None,
-                Some(png) => {
+                Some(png) => Some(IMAGES.with(|cache| -> Result<Retained<NSImage>> {
+                    let mut cache = cache.borrow_mut();
+                    if let Some(i) = cache.iter().position(|(p, _)| p == png) {
+                        let item = cache.remove(i).unwrap();
+                        let image = item.1.clone();
+                        cache.push_back(item);
+                        return Ok(image);
+                    }
                     let ns_icon = NSString::from_str(&png.to_string_lossy());
-                    Some(
-                        NSImage::initWithContentsOfFile(NSImage::alloc(), &ns_icon)
-                            .ok_or_else(|| anyhow::anyhow!("Cannot load icon {}", png.display()))?,
-                    )
-                }
+                    let image = NSImage::initWithContentsOfFile(NSImage::alloc(), &ns_icon)
+                        .ok_or_else(|| anyhow::anyhow!("Cannot load icon {}", png.display()))?;
+                    if cache.len() == 64 {
+                        cache.pop_front();
+                    }
+                    cache.push_back((png.to_path_buf(), image.clone()));
+                    Ok(image)
+                })?),
             };
             let workspace = NSWorkspace::sharedWorkspace();
             Ok(workspace.setIcon_forFile_options(

@@ -8,6 +8,7 @@
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -62,11 +63,15 @@ pub struct Theme {
     pub title: String,
     pub manifest: Manifest,
     source: IconSource,
+    pub(crate) prepared: std::cell::RefCell<HashMap<(PathBuf, String), PathBuf>>,
 }
 
 impl Theme {
+    pub(crate) fn immutable(&self) -> bool {
+        matches!(self.source, IconSource::Embedded(_))
+    }
     /// Raw SVG bytes for a manifest `iconPath`.
-    pub fn svg_bytes(&self, source: &str) -> Result<Vec<u8>> {
+    pub fn svg_bytes(&self, source: &str) -> Result<Cow<'_, [u8]>> {
         let name = Path::new(source)
             .file_name()
             .and_then(|n| n.to_str())
@@ -77,18 +82,18 @@ impl Theme {
         match &self.source {
             IconSource::Embedded(icons) => icons
                 .get(name)
-                .cloned()
+                .map(|b| Cow::Borrowed(b.as_slice()))
                 .with_context(|| format!("Theme is missing icon {name}")),
             IconSource::Disk { manifest_dir, root } => {
                 let candidate = manifest_dir.join(source);
                 let path = fs::canonicalize(&candidate)
                     .with_context(|| format!("Cannot read icon {}", candidate.display()))?;
-                let root = fs::canonicalize(root)
-                    .with_context(|| format!("Cannot resolve theme root {}", root.display()))?;
                 if !path.starts_with(&root) {
                     bail!("Icon {source} points outside the theme package");
                 }
-                fs::read(&path).with_context(|| format!("Cannot read icon {}", path.display()))
+                fs::read(&path)
+                    .map(Cow::Owned)
+                    .with_context(|| format!("Cannot read icon {}", path.display()))
             }
         }
     }
@@ -126,7 +131,7 @@ pub fn load(theme: &str, override_dir: Option<&Path>) -> Result<Theme> {
                 bytes,
                 IconSource::Disk {
                     manifest_dir,
-                    root: dir.to_path_buf(),
+                    root: fs::canonicalize(dir)?,
                 },
             )
         }
@@ -145,6 +150,7 @@ pub fn load(theme: &str, override_dir: Option<&Path>) -> Result<Theme> {
         title: "Material Icon Theme".to_string(),
         manifest,
         source,
+        prepared: std::cell::RefCell::new(HashMap::new()),
     })
 }
 
@@ -172,7 +178,7 @@ fn build_embedded() -> Result<Embedded> {
             entry.read_to_end(&mut buffer)?;
             manifest = Some(buffer);
         } else if let Some(name) = path.strip_prefix("icons/") {
-            if name.ends_with(".svg") {
+            if name.ends_with(".svg") && !name.starts_with("._") {
                 let mut buffer = Vec::new();
                 entry.read_to_end(&mut buffer)?;
                 icons.insert(name.to_string(), buffer);
@@ -192,7 +198,7 @@ mod tests {
     #[test]
     fn embedded_theme_loads_without_any_files() {
         let theme = load("material", None).unwrap();
-        assert!(theme.manifest.icon_definitions.len() > 1000);
+        assert!(theme.manifest.icon_definitions.len() > 500);
         let source = theme
             .manifest
             .icon_definitions

@@ -2,7 +2,7 @@
 
 Real file and folder icons in **macOS Finder** — and any other browser that honours macOS custom icons — using the artwork and associations from VS Code icon themes. The built-in theme is **[Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)**, with its real SVGs, filename/extension associations, named folders, and generic fallbacks.
 
-A single Rust binary with the theme embedded — no dependencies at runtime. Point it at a folder for a one-off apply, or install the background service: it watches your code roots, finds every git repository, and keeps their icons applied automatically. Icons are filesystem metadata, so they show with no per-app theme switch. The tool does **not** change file-type associations, Quick Look previews, or system icon themes.
+A single Rust binary with the theme embedded — no theme downloads at runtime. Point it at a folder for a one-off apply, or install the background service: it watches your code roots, finds every git repository, and keeps their icons applied automatically. Icons are filesystem metadata, so they show with no per-app theme switch. The tool does **not** change file-type associations, Quick Look previews, or system icon themes.
 
 ## Requirements
 
@@ -61,7 +61,7 @@ Exclusions are literal paths, not globs: `generated` matches that name at any de
 
 ## Automatic mode
 
-`service install` registers a per-user LaunchAgent that watches the folders in your config file and applies icons to every git repository it finds — on start, then incrementally for affected paths/subtrees. Events are coalesced after 500ms of quiet, with a five-second maximum debounce. Excluded build contents and Finder metadata produce no icon/journal work. Queue overflow or missed-event notifications trigger conservative reconciliation.
+`service install` registers a per-user LaunchAgent that watches the folders in your config file and applies icons to every git repository it finds — on start, then incrementally for affected paths/subtrees. Events are coalesced after 500ms of quiet, with a five-second maximum debounce. Excluded build contents and Finder metadata produce no icon/journal work. Queue overflow or missed-event notifications trigger conservative reconciliation. Missing records are retained for at least 30 seconds and reconciled again before pruning, so split rename notifications can recover ownership.
 
 ```sh
 ~/.local/bin/finder-icon-themes service install
@@ -123,6 +123,14 @@ New icons also record a resource-fork fingerprint. A manual replacement is never
 - Use an on-disk theme instead of the embedded one with `FINDER_ICON_THEMES_THEME_DIR=/path/to/material-icon-theme`.
 - Don't run two icon synchronisers against the same files at once.
 
+## Cache, logs and disk themes
+
+Rendering remains **256px**. AppKit keeps at most 64 decoded images on the calling thread, with an autorelease pool around every call. Embedded SVG bytes are borrowed; prepared PNG paths are memoized across repositories/ticks. Disk resources are read again to detect edits.
+
+The disposable PNG cache is trimmed to 1,024 content-addressed images / 64 MiB after apply and on watcher startup, with trimming every 64 new renders during a sweep. A sweep can briefly exceed those targets. Journals, backups and unrelated files are never evicted. Watch logs retain one tail backup (up to 2 MiB) and truncate the active file after it exceeds 2 MiB, checked at startup and at least every 30 seconds while idle. Active work can temporarily overshoot. Cleanup removes the cache only after ownership cleanup succeeds.
+
+The default renderer includes the vector features used by all shipped icons. For disk themes with text, fonts, embedded raster images or SVGZ, build with `cargo build --release --features extended-svg`. The global Git exclude file is resolved once per process; restart the watcher after changing Git's global exclude configuration or the app config/theme.
+
 ## Project layout
 
 ```text
@@ -157,6 +165,6 @@ The tests cover icon matching, scanning and opt-out, Git repository discovery, j
 
 ## Credits and licence
 
-[Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) by Material Extensions / PKief (MIT), embedded as a compressed archive; SVG rendering by [resvg](https://github.com/linebender/resvg).
+[Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) by Material Extensions / PKief (MIT), embedded as a compressed archive (MIT notice in `assets/material-theme-LICENSE`); SVG rendering by [resvg](https://github.com/linebender/resvg).
 
 This project is MIT-licensed (see [LICENSE](LICENSE)) and is independent — not affiliated with the Material Extensions maintainers.
