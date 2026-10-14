@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::macos;
 use crate::render::png_for;
-use crate::scanner::{collect_candidates, Candidate};
+use crate::scanner::{collect_with_config, Candidate};
 use crate::state::{identity, save_state, scoped_entries, state_paths, Entry, State};
 use crate::theme::Theme;
 
@@ -36,7 +36,7 @@ pub struct UndoReport {
 }
 
 pub fn candidates_for(root: &Path, theme: &Theme, config: &Config) -> Result<Vec<Candidate>> {
-    collect_candidates(root, &theme.manifest, config.files, config.folders)
+    collect_with_config(root, root, true, &theme.manifest, config)
 }
 
 /// Candidates that are new or whose recorded icon no longer matches.
@@ -264,6 +264,31 @@ pub fn apply_candidates(
         save_state(&state_paths().state, state)?;
     }
     Ok(report)
+}
+
+pub fn excluded_keys(
+    root: &Path,
+    theme: &Theme,
+    config: &Config,
+    state: &State,
+) -> Result<Vec<String>> {
+    let selected: std::collections::HashSet<_> = candidates_for(root, theme, config)?
+        .into_iter()
+        .map(|c| c.path.to_string_lossy().into_owned())
+        .collect();
+    Ok(scoped_entries(state, root)
+        .filter(|(p, _)| !selected.contains(*p))
+        .map(|(p, _)| p.clone())
+        .collect())
+}
+
+pub fn reconcile(
+    root: &Path,
+    theme: &Theme,
+    config: &Config,
+    state: &mut State,
+) -> Result<UndoReport> {
+    remove_keys(excluded_keys(root, theme, config, state)?, state)
 }
 
 pub fn undo(root: &Path, state: &mut State) -> Result<UndoReport> {

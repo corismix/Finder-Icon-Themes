@@ -567,3 +567,116 @@ fn watcher_filters_churn_and_repairs_saves_and_moves() {
     }
     assert!(sandbox.journal()["entries"][moved.to_str().unwrap()].is_object());
 }
+
+#[test]
+fn selective_policy_preview_and_reconcile_are_explicit() {
+    let sandbox = Sandbox::new("policy");
+    let repo = fs::canonicalize(sandbox.git_repo("project")).unwrap();
+    fs::create_dir_all(repo.join("docs")).unwrap();
+    fs::create_dir_all(repo.join("generated/deep")).unwrap();
+    for name in ["main.ts", "unknown.xyz", "generated/deep/a.ts"] {
+        fs::write(repo.join(name), "").unwrap();
+    }
+    assert!(sandbox
+        .run(&["apply", repo.to_str().unwrap()])
+        .status
+        .success());
+    let before = sandbox.journal();
+    let preview = sandbox.run(&[
+        "preview",
+        repo.to_str().unwrap(),
+        "--folders-only",
+        "--specific-matches-only",
+        "--exclude",
+        "generated",
+    ]);
+    assert!(preview.status.success(), "{}", stderr(&preview));
+    assert!(stdout(&preview).contains("Previously managed icons excluded"));
+    assert_eq!(sandbox.journal(), before);
+    // Narrowing apply does not implicitly strip previously managed icons.
+    assert!(sandbox
+        .run(&["apply", repo.to_str().unwrap(), "--folders-only"])
+        .status
+        .success());
+    assert!(finder_icon_themes::macos::has_custom_icon(
+        &repo.join("main.ts")
+    ));
+    let output = sandbox.run(&[
+        "reconcile",
+        repo.to_str().unwrap(),
+        "--folders-only",
+        "--specific-matches-only",
+        "--exclude",
+        "generated",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let entries = sandbox.journal()["entries"].as_object().unwrap().clone();
+    assert_eq!(entries.len(), 1); // Only specific .git folder in the fixture theme.
+    assert!(!finder_icon_themes::macos::has_custom_icon(
+        &repo.join("main.ts")
+    ));
+    assert!(!repo.join("generated/Icon\r").exists());
+}
+
+#[test]
+fn git_ignore_policy_preserves_tracked_files_negations_and_worktrees() {
+    let sandbox = Sandbox::new("git-policy");
+    let repo = fs::canonicalize(sandbox.git_repo("project")).unwrap();
+    fs::create_dir(repo.join("artifacts")).unwrap();
+    fs::write(repo.join(".gitignore"), "artifacts/\n*.ts\n!keep.ts\n").unwrap();
+    for name in [
+        "artifacts/tracked.ts",
+        "artifacts/ignored.ts",
+        "ignored.ts",
+        "keep.ts",
+        "tracked.ts",
+    ] {
+        fs::write(repo.join(name), "").unwrap();
+    }
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["add", "-f", "tracked.ts", "artifacts/tracked.ts"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let output = sandbox.run(&["preview", repo.to_str().unwrap(), "--respect-gitignore"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("tracked.ts"), "{text}");
+    assert!(text.contains("artifacts/tracked.ts"), "{text}");
+    assert!(text.contains("keep.ts"), "{text}");
+    assert!(!text.contains("ignored.ts"), "{text}");
+    // A real worktree uses a .git pointer; ignore rules still apply.
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture"
+        ])
+        .status()
+        .unwrap()
+        .success());
+    let worktree = sandbox.path("worktree");
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "add", "--detach", "-q"])
+        .arg(&worktree)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(worktree.join(".gitignore"), "*.ts\n!keep.ts\n").unwrap();
+    fs::write(worktree.join("ignored.ts"), "").unwrap();
+    fs::write(worktree.join("keep.ts"), "").unwrap();
+    let output = sandbox.run(&["preview", worktree.to_str().unwrap(), "--respect-gitignore"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("ignored.ts"));
+    assert!(stdout(&output).contains("keep.ts"));
+}

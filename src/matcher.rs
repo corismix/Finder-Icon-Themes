@@ -18,6 +18,16 @@ pub fn find_icon(
     manifest: &Manifest,
     is_root: bool,
 ) -> Option<IconMatch> {
+    find_icon_policy(name, is_directory, manifest, is_root, true)
+}
+
+pub fn find_icon_policy(
+    name: &str,
+    is_directory: bool,
+    manifest: &Manifest,
+    is_root: bool,
+    fallbacks: bool,
+) -> Option<IconMatch> {
     let lower = name.to_lowercase();
     let id = if is_directory {
         let id = if is_root {
@@ -27,13 +37,19 @@ pub fn find_icon(
         }
         .or_else(|| manifest.folder_names.get(&lower))
         .or_else(|| {
-            if is_root {
+            if is_root && fallbacks {
                 manifest.root_folder.as_ref()
             } else {
                 None
             }
         })
-        .or_else(|| manifest.folder.as_ref())?;
+        .or_else(|| {
+            if fallbacks {
+                manifest.folder.as_ref()
+            } else {
+                None
+            }
+        })?;
         id.clone()
     } else {
         let mut id = manifest.file_names.get(&lower).cloned();
@@ -50,7 +66,13 @@ pub fn find_icon(
                 id = manifest.file_extensions.get(&lower[1..]).cloned();
             }
         }
-        id.or_else(|| manifest.file.clone())?
+        id.or_else(|| {
+            if fallbacks {
+                manifest.file.clone()
+            } else {
+                None
+            }
+        })?
     };
     let definition = manifest.icon_definitions.get(&id)?;
     if definition.icon_path.is_empty() {
@@ -196,6 +218,16 @@ mod tests {
                 .id,
             "file"
         );
+    }
+
+    #[test]
+    fn specificity_is_a_rule_not_an_icon_id() {
+        let mut m = manifest();
+        m.file_names.insert("special".into(), "file".into());
+        assert!(find_icon_policy("special", false, &m, false, false).is_some());
+        assert!(find_icon_policy("unknown", false, &m, false, false).is_none());
+        assert!(find_icon_policy("docs", true, &m, false, false).is_some());
+        assert!(find_icon_policy("misc", true, &m, false, false).is_none());
     }
 
     #[test]

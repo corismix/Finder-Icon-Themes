@@ -131,8 +131,16 @@ fn roots(config: &Config) -> Vec<PathBuf> {
     }
     out
 }
-fn discover(roots: &[PathBuf]) -> Vec<PathBuf> {
-    roots.iter().flat_map(|r| git::discover_repos(r)).collect()
+fn discover(roots: &[PathBuf], config: &Config) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .flat_map(|r| {
+            git::discover_repos(r)
+                .into_iter()
+                .filter(|p| scanner::config_allows(r, p, config))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 fn version(path: &Path) -> Option<(SystemTime, u64, u64)> {
     use std::os::unix::fs::MetadataExt;
@@ -153,8 +161,9 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
     let missed = Arc::new(AtomicBool::new(false));
     let overflow = missed.clone();
     let callback_roots = roots.clone();
+    let callback_config = config.clone();
     let mut watcher = recommended_watcher(move |result: notify::Result<Event>| {
-        let event = match result {
+        let mut event = match result {
             Ok(e) if e.paths.len() <= MAX_PATHS => e,
             _ => {
                 overflow.store(true, Ordering::Release);
@@ -162,6 +171,27 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
                 return;
             }
         };
+        if callback_config.respect_gitignore {
+            let mut policy_changed = false;
+            for path in &mut event.paths {
+                if path.file_name().is_some_and(|n| n == ".gitignore") {
+                    *path = path.parent().unwrap_or(path).to_path_buf();
+                    policy_changed = true;
+                } else if path.ends_with(".git/info/exclude") || path.ends_with(".git/index") {
+                    if let Some(repo) = path
+                        .ancestors()
+                        .find(|p| p.file_name().is_some_and(|n| n == ".git"))
+                        .and_then(|p| p.parent())
+                    {
+                        *path = repo.to_path_buf();
+                        policy_changed = true;
+                    }
+                }
+            }
+            if policy_changed {
+                event.kind = EventKind::Modify(ModifyKind::Any);
+            }
+        }
         // Reject irrelevant paths before they consume bounded queue space. Keep
         // both endpoints of renames; a move out of a policy boundary still owns
         // its icon and must transfer its journal record.
@@ -176,7 +206,8 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
                         && (p
                             .file_name()
                             .is_some_and(|n| n == scanner::OPT_OUT_MARKER || n == ".git")
-                            || scanner::allowed_path(r, p))
+                            || scanner::allowed_path(r, p)
+                                && scanner::config_allows(r, p, &callback_config))
                 })
             });
         if !relevant || matches!(event.kind, EventKind::Access(_)) {
@@ -206,7 +237,7 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
                 loaded = true;
             }
             if dirty.rescan || dirty.discovery {
-                repos = discover(&roots);
+                repos = discover(&roots, config);
             }
             if dirty.rescan {
                 for repo in &repos {
@@ -235,13 +266,12 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
                         let result = if repo.starts_with(path) {
                             apply::apply(repo, theme, config, &paths.cache, &mut state)
                         } else {
-                            scanner::collect_at(
+                            scanner::collect_with_config(
                                 repo,
                                 path,
                                 *recursive,
                                 &theme.manifest,
-                                config.files,
-                                config.folders,
+                                config,
                             )
                             .and_then(|c| {
                                 apply::apply_candidates(c, theme, &paths.cache, &mut state)

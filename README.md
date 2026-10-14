@@ -32,25 +32,36 @@ Read-only preview, then apply, then undo if you change your mind:
 | `themes` | List the installed icon themes. |
 | `preview <folder>` | Show what would change, without writing anything. |
 | `apply <folder>` | Set icons on recognised files and folders. |
+| `reconcile <folder>` | Remove verified owned icons excluded by the selected policy; retain ambiguous/failed removals. |
 | `undo <folder>` | Remove **only** the icons this tool installed under that folder. |
 | `status <folder>` | List the icons currently recorded for that folder. |
 | `watch` | Run the watcher in the foreground. |
 | `service install\|uninstall\|start\|stop\|status` | Manage the background LaunchAgent. |
 | `clean` | Remove all managed icons, the global exclude rule, the service and state. |
 
-Options for `preview` and `apply`:
+Options for `preview`, `apply` and `reconcile`:
 
 | Option | Meaning |
 | --- | --- |
 | `--theme NAME` | Icon theme to use (default `material`). |
 | `--files-only` | Leave folder icons alone. |
-| `--folders-only` | Leave file icons alone. |
+| `--folders-only` | Select folders only. |
+| `--specific-matches-only` | Select name/extension matches, without generic fallbacks. |
+| `--exclude PATH` | Exclude a literal name or subtree; repeatable. |
+| `--respect-gitignore` | Skip Git-ignored untracked items, preserving tracked files. |
 
-There is no size limit: every file and folder the theme can name is themed, however large the repository.
+Space-saving policies are **off by default**. Narrowing a policy stops future application; it does not silently remove existing icons. Preview the same policy first, then explicitly reconcile:
+
+```sh
+finder-icon-themes preview   ~/Code/my-project --folders-only --specific-matches-only --exclude generated
+finder-icon-themes reconcile ~/Code/my-project --folders-only --specific-matches-only --exclude generated
+```
+
+Exclusions are literal paths, not globs: `generated` matches that name at any depth; `src/generated` is relative to the selected repository/folder; absolute paths exclude that subtree. Discovery also applies exclusions relative to each watch root. Git evaluates ignore rules, including negations, global excludes, worktrees and nested repositories/submodules. New untracked source files remain eligible unless ignored. Built-in dependency exclusions always apply. Each scan is bounded at 120,000 inspected entries.
 
 ## Automatic mode
 
-`service install` registers a per-user LaunchAgent that watches the folders in your config file and applies icons to every git repository it finds — on start, and again a couple of seconds after anything changes.
+`service install` registers a per-user LaunchAgent that watches the folders in your config file and applies icons to every git repository it finds — on start, then incrementally for affected paths/subtrees. Events are coalesced after 500ms of quiet, with a five-second maximum debounce. Excluded build contents and Finder metadata produce no icon/journal work. Queue overflow or missed-event notifications trigger conservative reconciliation.
 
 ```sh
 ~/.local/bin/finder-icon-themes service install
@@ -66,9 +77,12 @@ watch_roots = ["~/Code"]
 theme = "material"
 files = true
 folders = true
+specific_matches_only = false
+exclude = []
+respect_gitignore = false
 ```
 
-Nothing outside `watch_roots` is ever touched. Icons are never removed when the service stops, quits, or crashes — removal is always explicit (`undo`, `clean`).
+Nothing outside `watch_roots` is ever touched. Icons are never removed when the service stops, quits, or crashes — removal is always explicit (`undo`, `reconcile`, `clean`).
 
 ## How it chooses icons
 
@@ -100,7 +114,9 @@ Every icon the tool installs is recorded in a compact journal at:
 ~/.local/state/finder-icon-themes/state.json
 ```
 
-`undo` reads that journal to remove only its own icons. If a file has been moved or replaced since it was iconised, its entry is forgotten rather than applied blindly to whatever is there now.
+Mutations share an OS advisory lock, acquired before reading state. Apply checkpoints ownership before each batch; undo checkpoints after batches. No-op runs leave the journal unchanged. Atomic-save replacements are checked as new objects. Reconciliation and watcher renames transfer ownership by stable identity.
+
+New icons also record a resource-fork fingerprint. A manual replacement is never overwritten or removed; its record is retained. Legacy entries lack fingerprints, and an interrupted apply can leave an ambiguous intent: those custom icons are left in place and removal reports them for recovery. Cleanup stops the service first, preserves failed/ambiguous ownership records, and only removes state/cache after successful cleanup. Compatible schema-2/3 entries are retained; corrupt or unknown journals fail closed and remain intact.
 
 - Override the location with `FINDER_ICON_THEMES_HOME=/path`.
 - Override the config with `FINDER_ICON_THEMES_CONFIG=/path/to/config.toml`.
@@ -137,7 +153,7 @@ finder-icon-themes/
 cargo test
 ```
 
-The tests cover icon matching, scanning and opt-out, Git repository discovery, journal round-trips, the embedded theme, 128px rendering, and an end-to-end pass that applies icons to a real temporary repository, checks the global exclude, and verifies undo and clean.
+The tests cover icon matching, scanning and opt-out, Git repository discovery, journal round-trips, the embedded theme, 256px rendering, and an end-to-end pass that applies icons to a real temporary repository, checks the global exclude, and verifies undo and clean.
 
 ## Credits and licence
 

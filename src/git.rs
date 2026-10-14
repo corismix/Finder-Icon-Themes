@@ -240,3 +240,52 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+/// Let Git evaluate its own ignore/negation/global/worktree rules. `--others`
+/// preserves tracked files even if a pattern matches them; `--directory`
+/// collapses wholly ignored trees instead of enumerating build outputs.
+/// Each submodule/worktree is queried independently by the scanner.
+pub fn ignored_paths(repo: &Path) -> Result<Vec<PathBuf>> {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStringExt;
+    use std::process::Stdio;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut bytes = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .unwrap()
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() > 16 * 1024 * 1024 {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("Git ignore listing exceeded its bound or failed; policy left unapplied");
+    }
+    anyhow::ensure!(
+        child.wait()?.success(),
+        "Cannot evaluate Git ignore policy at {}",
+        repo.display()
+    );
+    Ok(bytes
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let p = p.strip_suffix(b"/").unwrap_or(p);
+            repo.join(std::ffi::OsString::from_vec(p.to_vec()))
+        })
+        .collect())
+}

@@ -18,6 +18,15 @@ pub struct Config {
     pub files: bool,
     #[serde(default = "default_true")]
     pub folders: bool,
+    /// Disable generic fallbacks; matching a name/extension is still specific
+    /// even when a theme maps it to the same artwork as its fallback.
+    #[serde(default)]
+    pub specific_matches_only: bool,
+    /// Names (any depth), root-relative paths, or absolute subtree paths.
+    #[serde(default)]
+    pub exclude: Vec<PathBuf>,
+    #[serde(default)]
+    pub respect_gitignore: bool,
 }
 
 fn default_theme() -> String {
@@ -35,7 +44,27 @@ impl Default for Config {
             theme: default_theme(),
             files: true,
             folders: true,
+            specific_matches_only: false,
+            exclude: Vec::new(),
+            respect_gitignore: false,
         }
+    }
+}
+
+impl Config {
+    pub fn validate(&self) -> Result<()> {
+        for exclude in &self.exclude {
+            anyhow::ensure!(
+                !exclude.as_os_str().is_empty()
+                    && !exclude.components().any(|c| matches!(
+                        c,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )),
+                "Exclusions must be literal normalized names or paths: {}",
+                exclude.display()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -52,7 +81,17 @@ pub fn load() -> Result<Config> {
     }
     let text =
         fs::read_to_string(&path).with_context(|| format!("Cannot read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("Cannot parse {}", path.display()))
+    let mut config: Config =
+        toml::from_str(&text).with_context(|| format!("Cannot parse {}", path.display()))?;
+    for root in &mut config.watch_roots {
+        if let Some(rest) = root.to_string_lossy().strip_prefix("~/") {
+            *root = home().join(rest);
+        } else if root == &PathBuf::from("~") {
+            *root = home();
+        }
+    }
+    config.validate()?;
+    Ok(config)
 }
 
 /// Write a starter config if none exists yet.

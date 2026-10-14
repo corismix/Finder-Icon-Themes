@@ -4,8 +4,10 @@ use anyhow::{bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::matcher::{find_icon, skips_contents};
+use crate::config::Config;
+use crate::matcher::{find_icon_policy, skips_contents};
 use crate::theme::Manifest;
+use std::collections::HashMap;
 
 /// A folder containing this marker is left completely alone (the folder and its
 /// whole subtree), so individual folders can opt out of custom icons.
@@ -57,6 +59,98 @@ pub fn allowed_path(root: &Path, path: &Path) -> bool {
     true
 }
 
+/// Exclusions are literal paths, not globs: a single name matches at any
+/// depth; multi-component relative paths are anchored to the selected root.
+pub fn config_allows(root: &Path, path: &Path, config: &Config) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    !config.exclude.iter().any(|exclude| {
+        if exclude.is_absolute() {
+            path.starts_with(exclude)
+        } else if exclude.components().count() == 1 {
+            relative
+                .components()
+                .any(|c| c.as_os_str() == exclude.as_os_str())
+        } else {
+            relative.starts_with(exclude)
+        }
+    })
+}
+
+struct Policy<'a> {
+    root: &'a Path,
+    config: &'a Config,
+    ignored: HashMap<PathBuf, Vec<PathBuf>>,
+}
+impl<'a> Policy<'a> {
+    fn new(root: &'a Path, config: &'a Config) -> Result<Self> {
+        let mut p = Self {
+            root,
+            config,
+            ignored: HashMap::new(),
+        };
+        if config.respect_gitignore {
+            if let Some(repo) = crate::git::repo_for(root) {
+                p.add_repo(&repo)?;
+            }
+        }
+        Ok(p)
+    }
+    fn add_repo(&mut self, repo: &Path) -> Result<()> {
+        if !self.ignored.contains_key(repo) {
+            self.ignored
+                .insert(repo.to_path_buf(), crate::git::ignored_paths(repo)?);
+        }
+        Ok(())
+    }
+    fn allows(&self, path: &Path) -> bool {
+        allowed_path(self.root, path)
+            && config_allows(self.root, path, self.config)
+            && !self.ignored.values().flatten().any(|p| path.starts_with(p))
+    }
+    fn candidate(&self, path: &Path, manifest: &Manifest) -> Result<Option<Candidate>> {
+        if path == self.root || !self.allows(path) {
+            return Ok(None);
+        }
+        let meta = match path.symlink_metadata() {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let directory = meta.is_dir();
+        if meta.file_type().is_symlink()
+            || (!directory && !meta.is_file())
+            || (directory && !self.config.folders)
+            || (!directory && !self.config.files)
+        {
+            return Ok(None);
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name == ".git" && !directory {
+            return Ok(None);
+        }
+        Ok(find_icon_policy(
+            &name,
+            directory,
+            manifest,
+            false,
+            !self.config.specific_matches_only,
+        )
+        .map(|m| Candidate {
+            path: path.to_path_buf(),
+            relative: path
+                .strip_prefix(self.root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned(),
+            directory,
+            id: m.id,
+            source: m.source,
+        }))
+    }
+}
+
 pub fn candidate_at(
     root: &Path,
     path: &Path,
@@ -64,43 +158,14 @@ pub fn candidate_at(
     files: bool,
     folders: bool,
 ) -> Result<Option<Candidate>> {
-    if path == root || !allowed_path(root, path) {
-        return Ok(None);
-    }
-    let meta = match path.symlink_metadata() {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
+    let config = Config {
+        files,
+        folders,
+        ..Config::default()
     };
-    let directory = meta.is_dir();
-    if meta.file_type().is_symlink()
-        || (!directory && !meta.is_file())
-        || (directory && !folders)
-        || (!directory && !files)
-    {
-        return Ok(None);
-    }
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    if name == ".git" && !directory {
-        return Ok(None);
-    }
-    Ok(
-        find_icon(&name, directory, manifest, false).map(|m| Candidate {
-            path: path.to_path_buf(),
-            relative: path
-                .strip_prefix(root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .into_owned(),
-            directory,
-            id: m.id,
-            source: m.source,
-        }),
-    )
+    Policy::new(root, &config)?.candidate(path, manifest)
 }
 
-/// Reconcile a single object or a newly created/moved subtree. A normal file
-/// save never traverses its parent repository.
 pub fn collect_at(
     root: &Path,
     path: &Path,
@@ -109,20 +174,77 @@ pub fn collect_at(
     files: bool,
     folders: bool,
 ) -> Result<Vec<Candidate>> {
-    if !allowed_path(root, path) {
+    collect_with_config(
+        root,
+        path,
+        recursive,
+        manifest,
+        &Config {
+            files,
+            folders,
+            ..Config::default()
+        },
+    )
+}
+
+pub fn collect_with_config(
+    root: &Path,
+    path: &Path,
+    recursive: bool,
+    manifest: &Manifest,
+    config: &Config,
+) -> Result<Vec<Candidate>> {
+    let mut policy = Policy::new(root, config)?;
+    if config.respect_gitignore {
+        if let Some(repo) = crate::git::repo_for(path) {
+            policy.add_repo(&repo)?;
+        }
+    }
+    if !policy.allows(path) {
         return Ok(Vec::new());
     }
     let mut found = Vec::new();
-    if let Some(item) = candidate_at(root, path, manifest, files, folders)? {
+    if let Some(item) = policy.candidate(path, manifest)? {
         found.push(item);
     }
-    if recursive
-        && path.is_dir()
-        && !path
-            .file_name()
-            .is_some_and(|n| skips_contents(&n.to_string_lossy()))
+    if !recursive
+        || !path.is_dir()
+        || (path != root
+            && path
+                .file_name()
+                .is_some_and(|n| skips_contents(&n.to_string_lossy())))
     {
-        found.extend(collect_candidates(path, manifest, files, folders)?);
+        return Ok(found);
+    }
+    let mut inspected = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if config.respect_gitignore && crate::git::is_repo(&dir) {
+            policy.add_repo(&dir)?;
+        }
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let kind = entry.file_type()?;
+            if skipped_name(&name) || kind.is_symlink() {
+                continue;
+            }
+            inspected += 1;
+            if inspected > MAX_ENTRIES {
+                bail!("Scan stopped at {MAX_ENTRIES} entries. Choose a smaller folder.");
+            }
+            let full = entry.path();
+            if !policy.allows(&full) {
+                continue;
+            }
+            if let Some(item) = policy.candidate(&full, manifest)? {
+                found.push(item);
+            }
+            if kind.is_dir() && !skips_contents(&name) {
+                stack.push(full);
+            }
+        }
     }
     Ok(found)
 }
@@ -136,57 +258,17 @@ pub fn collect_candidates(
     files: bool,
     folders: bool,
 ) -> Result<Vec<Candidate>> {
-    if opted_out(root) {
-        return Ok(Vec::new());
-    }
-    let mut found = Vec::new();
-    let mut inspected = 0usize;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)?.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let file_type = entry.file_type()?;
-            let is_dir = file_type.is_dir();
-            // Iconise a real `.git` folder, but never descend into it. A `.git`
-            // file (worktree/submodule pointer) is left alone.
-            if name == ".git" && !is_dir {
-                continue;
-            }
-            if skipped_name(&name) {
-                continue;
-            }
-            inspected += 1;
-            if inspected > MAX_ENTRIES {
-                bail!("Scan stopped at {MAX_ENTRIES} entries. Choose a smaller folder.");
-            }
-            if file_type.is_symlink() {
-                continue;
-            }
-            let full = entry.path();
-            if is_dir && opted_out(&full) {
-                continue;
-            }
-            if (is_dir && folders) || (!is_dir && files) {
-                let is_root = full == root;
-                if let Some(m) = find_icon(&name, is_dir, manifest, is_root) {
-                    found.push(Candidate {
-                        relative: full
-                            .strip_prefix(root)
-                            .unwrap_or(&full)
-                            .to_string_lossy()
-                            .into_owned(),
-                        path: full.clone(),
-                        directory: is_dir,
-                        id: m.id,
-                        source: m.source,
-                    });
-                }
-            }
-            if is_dir && !skips_contents(&name) {
-                stack.push(full);
-            }
-        }
-    }
+    let mut found = collect_with_config(
+        root,
+        root,
+        true,
+        manifest,
+        &Config {
+            files,
+            folders,
+            ..Config::default()
+        },
+    )?;
     found.sort_by(|a, b| a.relative.cmp(&b.relative));
     Ok(found)
 }

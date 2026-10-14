@@ -27,6 +27,8 @@ enum Command {
     Preview(TargetArgs),
     /// Set icons on recognised files and folders.
     Apply(TargetArgs),
+    /// Remove verified managed icons excluded by the selected policy.
+    Reconcile(TargetArgs),
     /// Remove only the icons this tool installed under a folder.
     Undo(TargetArgs),
     /// Show the icons recorded for a folder.
@@ -51,6 +53,13 @@ struct TargetArgs {
     files_only: bool,
     #[arg(long)]
     folders_only: bool,
+    #[arg(long)]
+    specific_matches_only: bool,
+    /// Literal name, root-relative subtree or absolute path (repeatable).
+    #[arg(long)]
+    exclude: Vec<PathBuf>,
+    #[arg(long)]
+    respect_gitignore: bool,
 }
 
 #[derive(Subcommand)]
@@ -88,6 +97,10 @@ fn with_overrides(mut config: Config, args: &TargetArgs) -> Result<Config> {
     if args.folders_only {
         config.files = false;
     }
+    config.specific_matches_only |= args.specific_matches_only;
+    config.respect_gitignore |= args.respect_gitignore;
+    config.exclude.extend(args.exclude.iter().cloned());
+    config.validate()?;
     ensure_something_to_do(&config)?;
     Ok(config)
 }
@@ -114,7 +127,8 @@ fn main() -> Result<()> {
             require_dir(&root)?;
             let theme = load_theme(&config)?;
             let state = read_state(&paths.state)?;
-            let candidates = apply::candidates_for(&root, &theme, &config)?;
+            let mut candidates = apply::candidates_for(&root, &theme, &config)?;
+            candidates.sort_by(|a, b| a.relative.cmp(&b.relative));
             let affected = apply::affected(&candidates, &state);
             println!(
                 "{}: {} recognised or fallback icons under {}.",
@@ -132,6 +146,11 @@ fn main() -> Result<()> {
             }
             if affected.len() > 45 {
                 println!("  ... {} more", affected.len() - 45);
+            }
+            let excluded = apply::excluded_keys(&root, &theme, &config, &state)?;
+            println!("Previously managed icons excluded by this policy: {}. Apply leaves them in place; use reconcile to remove verified owned icons.", excluded.len());
+            for key in excluded.iter().take(15) {
+                println!("  excluded  {key}");
             }
             println!(
                 "Preview only. To apply: finder-icon-themes apply {}",
@@ -151,6 +170,19 @@ fn main() -> Result<()> {
                 report.applied, report.unchanged, report.custom_skipped, report.stale_skipped, report.failed
             );
             println!("Undo: finder-icon-themes undo {}", root.display());
+            if report.failed > 0 {
+                std::process::exit(1);
+            }
+        }
+        Command::Reconcile(args) => {
+            let config = with_overrides(config, &args)?;
+            let root = resolve(&args.folder);
+            require_dir(&root)?;
+            let theme = load_theme(&config)?;
+            let _guard = MutationLock::acquire(&paths.base)?;
+            let mut state = read_state(&paths.state)?;
+            let report = apply::reconcile(&root, &theme, &config, &mut state)?;
+            println!("Excluded owned icons removed: {}; stale records: {}; ambiguous or failed removals retained: {}.", report.removed, report.stale, report.failed);
             if report.failed > 0 {
                 std::process::exit(1);
             }
