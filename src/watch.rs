@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::apply;
 use crate::config::Config;
 use crate::git;
-use crate::state::{read_state, state_paths, State};
+use crate::state::{read_state, state_paths, MutationLock, State};
 use crate::theme::Theme;
 
 /// Wait this long after the last filesystem event before doing any work.
@@ -32,6 +32,7 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
     let paths = state_paths();
 
     {
+        let _guard = MutationLock::acquire(&paths.base)?;
         let mut state = read_state(&paths.state)?;
         sync(config, theme, &roots, None, &mut state);
     }
@@ -58,6 +59,7 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
         }
+        let _guard = MutationLock::acquire(&paths.base)?;
         let mut state = read_state(&paths.state)?;
         sync(config, theme, &roots, Some(&changed), &mut state);
     }

@@ -110,10 +110,17 @@ fn expand_home(raw: &str) -> PathBuf {
 /// only when this tool added it, so `clean` can take it back out.
 pub fn ensure_global_rule(state: &mut State) -> Result<()> {
     let file = global_excludes_file();
-    let before = fs::read_to_string(&file).unwrap_or_default();
+    let before = match fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).context("Cannot read global excludes"),
+    };
     if before.lines().any(|line| line.trim() == RULE) {
+        let owned = state.excludes.global_owned
+            && state.excludes.global_file.as_ref() == Some(&file)
+            && before.contains(&format!("{MARKER}\n{RULE}\n"));
         state.excludes.global_file = Some(file);
-        state.excludes.global_owned = false;
+        state.excludes.global_owned = owned;
         return Ok(());
     }
     if let Some(parent) = file.parent() {
@@ -146,7 +153,12 @@ pub fn remove_global_rule(state: &mut State) -> Result<()> {
     );
     if owned {
         if let Some(file) = file {
-            if let Ok(text) = fs::read_to_string(&file) {
+            let text = match fs::read_to_string(&file) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(e) => return Err(e).context("Cannot read owned global excludes"),
+            };
+            {
                 let block = format!("{MARKER}\n{RULE}\n");
                 if text.contains(&block) {
                     fs::write(&file, text.replace(&block, ""))

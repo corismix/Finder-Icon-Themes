@@ -7,28 +7,42 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 pub const SCHEMA: u32 = 3;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// dev:ino:birthtime — detects a path replaced since we iconised it.
-    #[serde(rename = "i")]
+    #[serde(rename = "i", alias = "identity")]
     pub identity: String,
     /// Theme icon id, e.g. `typescript`.
-    #[serde(rename = "d")]
+    #[serde(rename = "d", alias = "id")]
     pub id: String,
     /// Whether the entry is a folder.
-    #[serde(rename = "dir")]
+    #[serde(rename = "dir", alias = "directory")]
     pub directory: bool,
+    /// Content revision, independent of the matcher's ID.
+    #[serde(rename = "r", default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Resource-fork fingerprint; absent on legacy or interrupted intents.
+    #[serde(rename = "p", default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    #[serde(
+        rename = "pending",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub pending: bool,
 }
 
 /// The single global Git exclude rule we may own. We never touch a repo's
 /// `.git/info/exclude` or its tracked `.gitignore`.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Excludes {
     #[serde(rename = "gf", default)]
     pub global_file: Option<PathBuf>,
@@ -36,7 +50,7 @@ pub struct Excludes {
     pub global_owned: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct State {
     pub schema: u32,
     #[serde(default)]
@@ -76,61 +90,49 @@ pub fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
-/// Read the journal. An unreadable or foreign journal (for example a schema 1
-/// file from the earlier Node tool) is preserved alongside and replaced with a
-/// fresh one, rather than aborting the command — a background service must never
-/// crash-loop on it.
+/// Read compatible journals without abandoning ownership. Unknown/corrupt data
+/// fails closed: a background restart must never replace it with an empty state.
 pub fn read_state(file: &Path) -> Result<State> {
     let text = match fs::read_to_string(file) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(State::default()),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("Cannot read icon journal at {}", file.display()))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(State::default()),
+        Err(e) => return Err(e).context("Cannot read icon journal"),
     };
-    match serde_json::from_str::<State>(&text) {
-        Ok(state) if state.schema == SCHEMA => Ok(state),
-        parsed => {
-            let reason = match parsed {
-                Ok(state) => format!("schema {}", state.schema),
-                Err(error) => error.to_string(),
-            };
-            let backup = backup_path(file);
-            fs::rename(file, &backup).with_context(|| {
-                format!(
-                    "Journal at {} is unusable ({reason}) and could not be set aside",
-                    file.display()
-                )
-            })?;
-            eprintln!(
-                "finder-icon-themes: ignoring unusable journal at {} ({reason}); preserved as {}",
-                file.display(),
-                backup.display()
-            );
-            Ok(State::default())
-        }
-    }
+    let mut state: State =
+        serde_json::from_str(&text).context("Cannot parse icon journal; left intact")?;
+    anyhow::ensure!(
+        (2..=SCHEMA).contains(&state.schema),
+        "Unsupported journal schema {}; left intact",
+        state.schema
+    );
+    state.schema = SCHEMA;
+    Ok(state)
 }
 
-fn backup_path(file: &Path) -> PathBuf {
-    let candidate = suffixed(file, ".bak");
-    if !candidate.exists() {
-        return candidate;
+/// All mutation sessions acquire this lock BEFORE loading the journal. Keep
+/// the inode in place; unlinking an advisory lock allows two independent locks.
+pub struct MutationLock(fs::File);
+impl MutationLock {
+    pub fn acquire(base: &Path) -> Result<Self> {
+        fs::create_dir_all(base)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(base.join("journal.lock"))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("Cannot lock journal");
+        }
+        Ok(Self(file))
     }
-    for n in 2.. {
-        let candidate = suffixed(file, &format!(".bak{n}"));
-        if !candidate.exists() {
-            return candidate;
+}
+impl Drop for MutationLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
     }
-    unreachable!()
-}
-
-fn suffixed(file: &Path, suffix: &str) -> PathBuf {
-    let mut name = file.file_name().unwrap_or_default().to_os_string();
-    name.push(suffix);
-    file.with_file_name(name)
 }
 
 pub fn save_state(file: &Path, state: &State) -> Result<()> {
@@ -140,12 +142,17 @@ pub fn save_state(file: &Path, state: &State) -> Result<()> {
     }
     let temp = file.with_extension(format!("{}.tmp", std::process::id()));
     let text = serde_json::to_string(state)?;
-    fs::write(&temp, text).with_context(|| format!("Cannot write {}", temp.display()))?;
+    let mut output = fs::File::create(&temp)?;
+    output.write_all(text.as_bytes())?;
+    output.sync_all()?;
     fs::rename(&temp, file).with_context(|| format!("Cannot replace {}", file.display()))?;
+    if let Some(parent) = file.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 
-fn identity_of(meta: &fs::Metadata) -> String {
+pub fn identity_of(meta: &fs::Metadata) -> String {
     let ms = meta
         .created()
         .or_else(|_| meta.modified())
@@ -193,6 +200,9 @@ mod tests {
                 identity: "16777220:123456789:1700000000000".into(),
                 id: "typescript".into(),
                 directory: false,
+                revision: None,
+                payload: None,
+                pending: false,
             },
         );
         save_state(&file, &state).unwrap();
@@ -205,40 +215,20 @@ mod tests {
     }
 
     #[test]
-    fn foreign_journal_is_preserved_and_replaced() {
-        let dir = std::env::temp_dir().join(format!("fit-state-foreign-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+    fn compatible_journal_preserves_ownership_and_unknown_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("fit-migrate-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("state.json");
-        let old = r#"{"schema":2,"entries":{"/tmp/old":{"identity":"1:2:3","id":"file","theme":"material","directory":false,"repo":null}},"excludes":{}}"#;
-        fs::write(&file, old).unwrap();
-
-        let state = read_state(&file).unwrap();
-        assert!(
-            state.entries.is_empty(),
-            "a foreign journal must not be loaded"
+        fs::write(&file, r#"{"schema":2,"entries":{"/tmp/old":{"identity":"1:2:3","id":"file","directory":false}},"excludes":{}}"#).unwrap();
+        assert_eq!(
+            read_state(&file).unwrap().entries["/tmp/old"].identity,
+            "1:2:3"
         );
-        assert!(!file.exists(), "the foreign journal is moved aside");
-        assert_eq!(fs::read_to_string(dir.join("state.json.bak")).unwrap(), old);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn repeated_foreign_journals_do_not_clobber_backups() {
-        let dir = std::env::temp_dir().join(format!("fit-state-multi-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("state.json");
-        fs::write(&file, r#"{"schema":1,"entries":{},"excludes":{}}"#).unwrap();
-        read_state(&file).unwrap();
-        fs::write(&file, r#"{"schema":2,"entries":{},"excludes":{}}"#).unwrap();
-        read_state(&file).unwrap();
-        assert!(dir.join("state.json.bak").is_file(), "first backup kept");
-        assert!(
-            dir.join("state.json.bak2").is_file(),
-            "second backup kept separately"
-        );
-        let _ = fs::remove_dir_all(&dir);
+        let unknown = r#"{"schema":99,"entries":{},"excludes":{}}"#;
+        fs::write(&file, unknown).unwrap();
+        assert!(read_state(&file).is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), unknown);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

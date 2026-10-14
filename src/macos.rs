@@ -2,8 +2,7 @@
 
 use std::path::Path;
 
-#[cfg(target_os = "macos")]
-pub use imp::{has_custom_icon, set_icon};
+pub use imp::{has_custom_icon, icon_fingerprint, set_icon};
 
 /// Does this item already carry a custom icon (ours or anyone else's)?
 pub fn exists(path: &Path) -> bool {
@@ -16,6 +15,7 @@ mod imp {
     use objc2::AnyThread;
     use objc2_app_kit::{NSImage, NSWorkspace, NSWorkspaceIconCreationOptions};
     use objc2_foundation::NSString;
+    use sha2::{Digest, Sha256};
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
@@ -28,18 +28,24 @@ mod imp {
     pub fn set_icon(path: &Path, icon: Option<&Path>) -> Result<bool> {
         let ok = objc2::rc::autoreleasepool(|_pool| {
             let ns_path = NSString::from_str(&path.to_string_lossy());
-            let image = icon.and_then(|png| {
-                let ns_icon = NSString::from_str(&png.to_string_lossy());
-                NSImage::initWithContentsOfFile(NSImage::alloc(), &ns_icon)
-            });
+            let image = match icon {
+                None => None,
+                Some(png) => {
+                    let ns_icon = NSString::from_str(&png.to_string_lossy());
+                    Some(
+                        NSImage::initWithContentsOfFile(NSImage::alloc(), &ns_icon)
+                            .ok_or_else(|| anyhow::anyhow!("Cannot load icon {}", png.display()))?,
+                    )
+                }
+            };
             let workspace = NSWorkspace::sharedWorkspace();
-            workspace.setIcon_forFile_options(
+            Ok(workspace.setIcon_forFile_options(
                 image.as_deref(),
                 &ns_path,
                 NSWorkspaceIconCreationOptions::empty(),
-            )
+            ))
         });
-        Ok(ok)
+        ok
     }
 
     /// A custom icon sets the `kHasCustomIcon` Finder flag and, for folders, an
@@ -49,6 +55,53 @@ mod imp {
             return true;
         }
         path.is_dir() && path.join("Icon\r").exists()
+    }
+
+    /// Fingerprint only icon payload, not other Finder metadata. Failure is
+    /// conservative: callers retain ownership and never clear an unknown icon.
+    pub fn icon_fingerprint(path: &Path) -> Result<Option<String>> {
+        if !has_custom_icon(path) {
+            return Ok(None);
+        }
+        let resource = if path.is_dir() {
+            path.join("Icon\r")
+        } else {
+            path.to_path_buf()
+        };
+        let c_path = CString::new(resource.as_os_str().as_bytes())?;
+        let attr = c"com.apple.ResourceFork";
+        let size = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(),
+                attr.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+            )
+        };
+        anyhow::ensure!(
+            (0..=16 * 1024 * 1024).contains(&size),
+            "Cannot read icon payload at {}",
+            path.display()
+        );
+        let mut bytes = vec![0u8; size as usize];
+        let read = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(),
+                attr.as_ptr(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+                0,
+                0,
+            )
+        };
+        anyhow::ensure!(
+            read == size,
+            "Icon payload changed while reading {}",
+            path.display()
+        );
+        Ok(Some(format!("{:x}", Sha256::digest(&bytes))))
     }
 
     fn finder_info_flag(path: &Path) -> bool {
@@ -82,6 +135,10 @@ mod imp {
 
     pub fn set_icon(_path: &Path, _icon: Option<&Path>) -> Result<bool> {
         bail!("Custom icons require macOS.")
+    }
+
+    pub fn icon_fingerprint(_path: &Path) -> Result<Option<String>> {
+        Ok(None)
     }
 
     pub fn has_custom_icon(path: &Path) -> bool {

@@ -1,10 +1,10 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 use finder_icon_themes::apply::{self, ensure_something_to_do};
 use finder_icon_themes::config::{self, Config};
-use finder_icon_themes::state::{read_state, state_paths};
+use finder_icon_themes::state::{read_state, state_paths, MutationLock};
 use finder_icon_themes::theme;
 use finder_icon_themes::{service, watch};
 
@@ -143,12 +143,9 @@ fn main() -> Result<()> {
             let root = resolve(&args.folder);
             require_dir(&root)?;
             let theme = load_theme(&config)?;
+            let _guard = MutationLock::acquire(&paths.base)?;
             let mut state = read_state(&paths.state)?;
-            acquire_lock(&paths.base)?;
-            let report = {
-                let _guard = LockGuard;
-                apply::apply(&root, &theme, &config, &paths.cache, &mut state)?
-            };
+            let report = { apply::apply(&root, &theme, &config, &paths.cache, &mut state)? };
             println!(
                 "Applied: {}; unchanged: {}; pre-existing custom icons skipped: {}; replaced paths skipped: {}; failed: {}.",
                 report.applied, report.unchanged, report.custom_skipped, report.stale_skipped, report.failed
@@ -160,12 +157,9 @@ fn main() -> Result<()> {
         }
         Command::Undo(args) => {
             let root = resolve(&args.folder);
+            let _guard = MutationLock::acquire(&paths.base)?;
             let mut state = read_state(&paths.state)?;
-            acquire_lock(&paths.base)?;
-            let report = {
-                let _guard = LockGuard;
-                apply::undo(&root, &mut state)?
-            };
+            let report = { apply::undo(&root, &mut state)? };
             println!(
                 "Restored defaults: {}; failed: {}{}.",
                 report.removed,
@@ -239,12 +233,31 @@ fn main() -> Result<()> {
             }
         },
         Command::Clean => {
+            // Stop before taking the mutation lock, so the daemon cannot
+            // reapply during cleanup. Isolated HOME has no service plist.
+            if service::is_installed() {
+                service::stop()?;
+            }
+            let _guard = MutationLock::acquire(&paths.base)?;
             let mut state = read_state(&paths.state)?;
-            let removed = apply::clean(&mut state)?;
-            let _ = service::uninstall();
-            let _ = std::fs::remove_file(&paths.state);
+            let report = apply::clean(&mut state)?;
+            if report.failed > 0 {
+                bail!(
+                    "Removed {} icons; {} ambiguous or failed removals retained in the journal",
+                    report.removed,
+                    report.failed
+                );
+            }
+            service::uninstall()?;
+            if paths.cache.exists() {
+                std::fs::remove_dir_all(&paths.cache)?;
+            }
+            if paths.state.exists() {
+                std::fs::remove_file(&paths.state)?;
+            }
             println!(
-                "Removed {removed} managed icons, the global exclude rule, the service and state."
+                "Removed {} managed icons, the global exclude rule, cache, service and state.",
+                report.removed
             );
         }
     }
@@ -259,32 +272,4 @@ fn require_dir(root: &std::path::Path) -> Result<()> {
         bail!("Not a directory: {}", root.display());
     }
     Ok(())
-}
-
-fn acquire_lock(base: &std::path::Path) -> Result<()> {
-    std::fs::create_dir_all(base).with_context(|| format!("Cannot create {}", base.display()))?;
-    let lock = base.join("journal.lock");
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock)
-        .map(|mut file| {
-            std::io::Write::write_all(&mut file, std::process::id().to_string().as_bytes())
-        })
-        .with_context(|| {
-            format!(
-                "Another sync may be running. Lock exists at {}",
-                lock.display()
-            )
-        })?
-        .with_context(|| format!("Cannot write lock at {}", lock.display()))?;
-    Ok(())
-}
-
-struct LockGuard;
-
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(state_paths().base.join("journal.lock"));
-    }
 }

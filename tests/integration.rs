@@ -435,3 +435,78 @@ fn a_repo_larger_than_the_old_limit_applies_in_full() {
     let journal = sandbox.journal();
     assert!(journal["entries"].as_object().unwrap().len() >= 1300);
 }
+
+#[test]
+fn noop_replacement_rename_and_manual_icons_keep_ownership_safe() {
+    let sandbox = Sandbox::new("ownership");
+    let repo = fs::canonicalize(sandbox.git_repo("project")).unwrap();
+    let file = repo.join("main.ts");
+    fs::write(&file, "old").unwrap();
+    assert!(sandbox
+        .run(&["apply", repo.to_str().unwrap()])
+        .status
+        .success());
+    let journal = sandbox.path("state/state.json");
+    let before = fs::metadata(&journal).unwrap().modified().unwrap();
+    let bytes = fs::read(&journal).unwrap();
+    assert!(sandbox
+        .run(&["apply", repo.to_str().unwrap()])
+        .status
+        .success());
+    assert_eq!(fs::metadata(&journal).unwrap().modified().unwrap(), before);
+    assert_eq!(fs::read(&journal).unwrap(), bytes);
+    // Atomic replacement gets a new object with no icon.
+    let replacement = repo.join("replacement");
+    fs::write(&replacement, "new").unwrap();
+    fs::rename(&replacement, &file).unwrap();
+    let output = sandbox.run(&["apply", repo.to_str().unwrap()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(finder_icon_themes::macos::has_custom_icon(&file));
+    let renamed = repo.join("moved.ts");
+    fs::rename(&file, &renamed).unwrap();
+    assert!(sandbox
+        .run(&["apply", repo.to_str().unwrap()])
+        .status
+        .success());
+    let state = sandbox.journal();
+    assert!(state["entries"][file.to_str().unwrap()].is_null());
+    assert!(state["entries"][renamed.to_str().unwrap()].is_object());
+    assert_eq!(state["excludes"]["go"], true);
+    // Set a different manual custom icon on the same inode.
+    let cache = sandbox.path("state/cache");
+    let theme = finder_icon_themes::theme::load("material", None).unwrap();
+    let source = &theme.manifest.icon_definitions["folder"].icon_path;
+    let png = finder_icon_themes::render::png_for(&theme, source, &cache).unwrap();
+    assert!(finder_icon_themes::macos::set_icon(&renamed, Some(&png)).unwrap());
+    let manual = finder_icon_themes::macos::icon_fingerprint(&renamed).unwrap();
+    let undone = sandbox.run(&["undo", repo.to_str().unwrap()]);
+    assert!(
+        !undone.status.success(),
+        "manual replacement must be retained"
+    );
+    assert_eq!(
+        finder_icon_themes::macos::icon_fingerprint(&renamed).unwrap(),
+        manual
+    );
+    assert!(sandbox.journal()["entries"][renamed.to_str().unwrap()].is_object());
+}
+
+#[test]
+fn lock_is_released_on_exit_and_read_happens_after_lock() {
+    use finder_icon_themes::state::MutationLock;
+    let sandbox = Sandbox::new("lock");
+    let repo = sandbox.git_repo("project");
+    fs::write(repo.join("a.ts"), "").unwrap();
+    let guard = MutationLock::acquire(&sandbox.path("state")).unwrap();
+    let mut child = sandbox
+        .command()
+        .args(["apply", repo.to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(!sandbox.path("state/state.json").exists());
+    drop(guard);
+    assert!(child.wait().unwrap().success());
+    let _guard = MutationLock::acquire(&sandbox.path("state")).unwrap();
+}

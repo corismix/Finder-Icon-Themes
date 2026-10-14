@@ -63,154 +63,311 @@ pub fn apply(
     state: &mut State,
 ) -> Result<ApplyReport> {
     let candidates = candidates_for(root, theme, config)?;
+    // Recover renames within a reconciliation scope before pruning old paths.
+    let identities: HashMap<String, String> = state
+        .entries
+        .iter()
+        .filter(|(p, _)| is_within(root, Path::new(p)))
+        .map(|(p, e)| (e.identity.clone(), p.clone()))
+        .collect();
+    let mut moved = false;
+    for item in &candidates {
+        let current = identity(&item.path)?;
+        if let Some(old) = identities.get(&current) {
+            if old != &item.path.to_string_lossy() && !Path::new(old).exists() {
+                moved |= transfer_move(Path::new(old), &item.path, state)?;
+            }
+        }
+    }
+    if moved {
+        save_state(&state_paths().state, state)?;
+    }
+    apply_candidates(candidates, theme, cache_dir, state)
+}
+
+/// Transfer ownership by identity, including all descendants of a moved folder.
+/// Never overwrite an unrelated destination record or follow symbolic links.
+pub fn transfer_move(from: &Path, to: &Path, state: &mut State) -> Result<bool> {
+    let keys: Vec<_> = state
+        .entries
+        .keys()
+        .filter(|p| is_within(from, Path::new(p)))
+        .cloned()
+        .collect();
+    let mut dirty = false;
+    for key in keys {
+        let suffix = Path::new(&key).strip_prefix(from)?;
+        let destination = if suffix.as_os_str().is_empty() {
+            to.to_path_buf()
+        } else {
+            to.join(suffix)
+        };
+        if destination
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(record) = state.entries.get(&key) else {
+            continue;
+        };
+        if identity(&destination).ok().as_ref() != Some(&record.identity) {
+            continue;
+        }
+        let target = destination.to_string_lossy().into_owned();
+        if state.entries.contains_key(&target) {
+            continue;
+        }
+        let record = state.entries.remove(&key).unwrap();
+        state.entries.insert(target, record);
+        dirty = true;
+    }
+    Ok(dirty)
+}
+
+pub fn apply_candidates(
+    candidates: Vec<Candidate>,
+    theme: &Theme,
+    cache_dir: &Path,
+    state: &mut State,
+) -> Result<ApplyReport> {
     let mut report = ApplyReport {
         candidates: candidates.len(),
         ..Default::default()
     };
-    report.already = candidates.len() - affected(&candidates, state).len();
-
-    // Inspect first, so a manually customised item is never clobbered.
-    let mut existing: HashMap<PathBuf, bool> = HashMap::new();
-    for item in &candidates {
-        existing.insert(item.path.clone(), macos::has_custom_icon(&item.path));
-    }
-
-    let mut todo: Vec<Candidate> = Vec::new();
+    let mut dirty = false;
+    let mut todo = Vec::new();
+    let mut png_cache: HashMap<String, PathBuf> = HashMap::new();
     for item in candidates {
         let key = item.path.to_string_lossy().into_owned();
-        let prev = state.entries.get(&key).cloned();
-        if let Some(prev) = &prev {
-            if prev.identity != identity(&item.path)? {
-                report.stale_skipped += 1;
-                continue;
-            }
+        let current = identity(&item.path)?;
+        let mut prev = state.entries.get(&key).cloned();
+        if prev.as_ref().is_some_and(|p| p.identity != current) {
+            state.entries.remove(&key);
+            dirty = true;
+            prev = None;
         }
-        let custom = existing.get(&item.path).copied().unwrap_or(false);
+        let custom = macos::has_custom_icon(&item.path);
         if custom && prev.is_none() {
             report.custom_skipped += 1;
             continue;
         }
-        if custom && prev.as_ref().map(|p| p.id == item.id).unwrap_or(false) {
+        if custom {
+            let record = prev.as_ref().unwrap();
+            if let Some(expected) = &record.payload {
+                if macos::icon_fingerprint(&item.path)?.as_ref() != Some(expected) {
+                    // Keep the record as evidence, but never overwrite a manual replacement.
+                    report.custom_skipped += 1;
+                    continue;
+                }
+            } else if record.pending {
+                report.custom_skipped += 1;
+                continue;
+            }
+        }
+        // PNG filename is the SVG + size revision. No bitmap is loaded here.
+        let png = if let Some(p) = png_cache.get(&item.source) {
+            p.clone()
+        } else {
+            let p = png_for(theme, &item.source, cache_dir)?;
+            png_cache.insert(item.source.clone(), p.clone());
+            p
+        };
+        let revision = png.file_stem().unwrap().to_string_lossy().into_owned();
+        if custom
+            && prev.as_ref().is_some_and(|p| {
+                p.id == item.id && p.revision.as_ref().map_or(true, |r| r == &revision)
+            })
+        {
             report.unchanged += 1;
+            report.already += 1;
             continue;
         }
-        todo.push(item);
+        // Legacy ownership cannot authorize replacing a possibly manual icon.
+        if custom && prev.as_ref().is_some_and(|p| p.payload.is_none()) {
+            report.custom_skipped += 1;
+            continue;
+        }
+        todo.push((item, current, png, revision));
     }
-
     if !todo.is_empty() {
+        let before = state.excludes.clone();
         crate::git::ensure_global_rule(state)?;
+        dirty |= before != state.excludes;
     }
-
-    let mut png_cache: HashMap<String, PathBuf> = HashMap::new();
     for batch in todo.chunks(BATCH) {
-        // Record the batch, persist once, then change the icons. The journal is
-        // always ahead of the filesystem, so an interruption stays undoable.
-        let mut pending: Vec<(String, Option<Entry>, PathBuf, PathBuf)> = Vec::new();
-        for item in batch {
-            let png = match png_cache.get(&item.source) {
-                Some(path) => path.clone(),
-                None => {
-                    let path = png_for(theme, &item.source, cache_dir)?;
-                    png_cache.insert(item.source.clone(), path.clone());
-                    path
-                }
-            };
+        let mut pending = Vec::new();
+        for (item, current, png, revision) in batch {
             let key = item.path.to_string_lossy().into_owned();
             let previous = state.entries.get(&key).cloned();
-            state.entries.insert(
-                key.clone(),
-                Entry {
-                    identity: identity(&item.path)?,
-                    id: item.id.clone(),
-                    directory: item.directory,
-                },
-            );
-            pending.push((key, previous, png, item.path.clone()));
+            let record = Entry {
+                identity: current.clone(),
+                id: item.id.clone(),
+                directory: item.directory,
+                revision: Some(revision.clone()),
+                payload: previous.as_ref().and_then(|p| p.payload.clone()),
+                pending: true,
+            };
+            state.entries.insert(key.clone(), record);
+            pending.push((key, previous, png, item));
         }
+        // Durable intent precedes AppKit. Successful fingerprints checkpoint in
+        // the same bounded batch; interrupted ambiguous intents remain recorded.
         save_state(&state_paths().state, state)?;
-        for (key, previous, png, path) in pending {
-            match macos::set_icon(&path, Some(&png)) {
-                Ok(true) => report.applied += 1,
-                Ok(false) | Err(_) => {
+        dirty = false;
+        for (key, previous, png, item) in pending {
+            // Recheck identity immediately before writing a path (atomic saves).
+            if identity(&item.path).ok().as_ref() != state.entries.get(&key).map(|r| &r.identity) {
+                report.stale_skipped += 1;
+                continue;
+            }
+            match macos::set_icon(&item.path, Some(png)) {
+                Ok(true) => {
+                    report.applied += 1;
+                    if let Ok(Some(payload)) = macos::icon_fingerprint(&item.path) {
+                        let record = state.entries.get_mut(&key).unwrap();
+                        record.payload = Some(payload);
+                        record.pending = false;
+                        dirty = true;
+                    }
+                }
+                _ => {
                     report.failed += 1;
-                    match previous {
-                        Some(prev) => state.entries.insert(key, prev),
-                        None => state.entries.remove(&key),
-                    };
+                    // Keep intent if the API partly succeeded; ownership must
+                    // not be silently discarded on a reported failure.
+                    if !macos::has_custom_icon(&item.path) {
+                        match previous {
+                            Some(p) => {
+                                state.entries.insert(key, p);
+                            }
+                            None => {
+                                state.entries.remove(&key);
+                            }
+                        }
+                        dirty = true;
+                    }
                 }
             }
         }
+        if dirty {
+            save_state(&state_paths().state, state)?;
+            dirty = false;
+        }
     }
-    save_state(&state_paths().state, state)?;
+    if dirty {
+        save_state(&state_paths().state, state)?;
+    }
     Ok(report)
 }
 
 pub fn undo(root: &Path, state: &mut State) -> Result<UndoReport> {
-    let mut report = UndoReport::default();
-    let tracked: Vec<String> = state
+    let keys = state
         .entries
         .keys()
         .filter(|p| is_within(root, Path::new(p)))
         .cloned()
         .collect();
+    remove_keys(keys, state)
+}
 
-    let mut eligible = Vec::new();
-    for key in tracked {
-        let record = state.entries.get(&key).cloned();
-        let stale = match (record, identity(Path::new(&key))) {
-            (Some(record), Ok(current)) => record.identity != current,
-            _ => true,
-        };
-        if stale {
-            report.stale += 1;
-            state.entries.remove(&key);
-        } else {
-            eligible.push(key);
-        }
-    }
-    report.eligible = eligible.len();
-    save_state(&state_paths().state, state)?;
-
-    for key in eligible {
-        match macos::set_icon(Path::new(&key), None) {
-            Ok(true) => {
-                report.removed += 1;
-                state.entries.remove(&key);
+/// Clear only an identified object with a verified payload. Legacy/pending
+/// custom icons are ambiguous, so retain their ownership record for recovery.
+pub fn remove_keys(keys: Vec<String>, state: &mut State) -> Result<UndoReport> {
+    let mut report = UndoReport::default();
+    let mut dirty = false;
+    for batch in keys.chunks(BATCH) {
+        for key in batch {
+            let Some(record) = state.entries.get(key) else {
+                continue;
+            };
+            let path = Path::new(key);
+            let current = match identity(path) {
+                Ok(i) => i,
+                Err(_)
+                    if !path.exists()
+                        && path
+                            .symlink_metadata()
+                            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    state.entries.remove(key);
+                    dirty = true;
+                    report.stale += 1;
+                    continue;
+                }
+                Err(_) => {
+                    report.failed += 1;
+                    continue;
+                }
+            };
+            if record.identity != current {
+                state.entries.remove(key);
+                dirty = true;
+                report.stale += 1;
+                continue;
             }
-            _ => report.failed += 1,
+            report.eligible += 1;
+            if path.symlink_metadata()?.file_type().is_symlink() {
+                report.failed += 1;
+                continue;
+            }
+            if macos::has_custom_icon(path) {
+                match macos::icon_fingerprint(path) {
+                    Ok(Some(p)) if record.payload.as_ref() == Some(&p) && !record.pending => (),
+                    _ => {
+                        report.failed += 1;
+                        continue;
+                    }
+                }
+                if !macos::set_icon(path, None).unwrap_or(false) {
+                    report.failed += 1;
+                    continue;
+                }
+                report.removed += 1;
+            }
+            state.entries.remove(key);
+            dirty = true;
         }
-        save_state(&state_paths().state, state)?;
+        // Icons first on removal: interruption leaves retryable ownership.
+        if dirty {
+            save_state(&state_paths().state, state)?;
+            dirty = false;
+        }
     }
-
     if state.entries.is_empty() {
+        let before = state.excludes.clone();
         crate::git::remove_global_rule(state)?;
-        save_state(&state_paths().state, state)?;
+        if before != state.excludes {
+            save_state(&state_paths().state, state)?;
+        }
     }
     Ok(report)
 }
 
-/// Forget journal entries whose paths no longer exist, and drop the global rule
-/// when nothing is managed any more.
+/// Prune only definitively missing paths in the affected scope. Permission and
+/// transient metadata errors never discard ownership.
 pub fn prune(state: &mut State, within: Option<&Path>) -> Result<()> {
     let keys: Vec<String> = state
         .entries
         .keys()
+        .filter(|p| within.map(|r| is_within(r, Path::new(p))).unwrap_or(true))
         .filter(|p| {
-            within
-                .map(|root| is_within(root, Path::new(p)))
-                .unwrap_or(true)
+            Path::new(p)
+                .symlink_metadata()
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
         })
-        .filter(|p| !Path::new(p).exists())
         .cloned()
         .collect();
+    if keys.is_empty() {
+        return Ok(());
+    }
     for key in keys {
         state.entries.remove(&key);
     }
     if state.entries.is_empty() {
         crate::git::remove_global_rule(state)?;
     }
-    save_state(&state_paths().state, state)?;
-    Ok(())
+    save_state(&state_paths().state, state)
 }
 
 pub fn status(root: &Path, state: &State) -> Vec<(String, bool, String)> {
@@ -229,19 +386,8 @@ pub fn status(root: &Path, state: &State) -> Vec<(String, bool, String)> {
         .collect()
 }
 
-pub fn clean(state: &mut State) -> Result<usize> {
-    let keys: Vec<String> = state.entries.keys().cloned().collect();
-    let mut removed = 0;
-    for key in keys {
-        if macos::set_icon(Path::new(&key), None).unwrap_or(false) {
-            removed += 1;
-        }
-        state.entries.remove(&key);
-    }
-    crate::git::remove_global_rule(state)?;
-    state.entries.clear();
-    save_state(&state_paths().state, state)?;
-    Ok(removed)
+pub fn clean(state: &mut State) -> Result<UndoReport> {
+    remove_keys(state.entries.keys().cloned().collect(), state)
 }
 
 /// Guard against a `--files-only`/`--folders-only` combination that would do nothing.
