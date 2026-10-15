@@ -26,6 +26,7 @@ const MAX_EVENT_PATHS: usize = 64;
 const MAX_PATHS: usize = 2048;
 const QUIET: Duration = Duration::from_millis(500);
 const MAX_DELAY: Duration = Duration::from_secs(5);
+const MAINTENANCE: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct Dirty {
@@ -227,6 +228,7 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
     let mut loaded = false;
     let mut generation = None;
     let mut repos = Vec::new();
+    let mut maintenance = Instant::now() + MAINTENANCE;
     let mut dirty = Dirty {
         rescan: true,
         ..Default::default()
@@ -238,8 +240,26 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
                 state = read_state(&paths.state)?;
                 loaded = true;
             }
+            // Traffic in unrelated repositories must not postpone recovery of
+            // missing ownership records indefinitely. Check after loading the
+            // journal under the mutation lock, even when events keep arriving.
+            if Instant::now() >= maintenance {
+                maintenance = Instant::now() + MAINTENANCE;
+                if state.entries.values().any(|e| e.missing_since.is_some()) {
+                    dirty.rescan = true;
+                }
+            }
             if dirty.rescan || dirty.discovery {
                 repos = discover(&roots, config);
+            }
+            // A maintenance sweep must still honor queued rename endpoints,
+            // including destinations excluded from normal reconciliation.
+            let mut moved = false;
+            for (from, to) in &dirty.moves {
+                moved |= apply::transfer_move(from, to, &mut state)?;
+            }
+            if moved {
+                save_state(&paths.state, &state)?;
             }
             if dirty.rescan {
                 for repo in &repos {
@@ -251,13 +271,6 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
                     apply::prune(&mut state, Some(root))?;
                 }
             } else {
-                let mut moved = false;
-                for (from, to) in &dirty.moves {
-                    moved |= apply::transfer_move(from, to, &mut state)?;
-                }
-                if moved {
-                    save_state(&paths.state, &state)?;
-                }
                 // Dirty paths collapse subtrees and duplicates. Repository
                 // resolution uses the index, never climbs outside watch roots.
                 for (path, recursive) in &dirty.paths {
@@ -297,7 +310,7 @@ pub fn run(config: &Config, theme: &Theme) -> Result<()> {
         dirty = Dirty::default();
         let first = loop {
             crate::service::bound_log()?;
-            match rx.recv_timeout(Duration::from_secs(30)) {
+            match rx.recv_timeout(MAINTENANCE) {
                 Ok(e) => break e,
                 Err(RecvTimeoutError::Timeout) => {
                     if state.entries.values().any(|e| e.missing_since.is_some()) {

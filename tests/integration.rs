@@ -570,6 +570,39 @@ fn watcher_filters_churn_and_repairs_saves_and_moves() {
         "{}",
         sandbox.journal()
     );
+    // A busy watch root must still retire deleted records. Age the tombstone
+    // under the shared lock to avoid spending the test's time on its grace
+    // period, then keep relevant events arriving throughout maintenance.
+    fs::remove_file(&moved).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while sandbox.journal()["entries"][moved.to_str().unwrap()]["missing"].is_null()
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(sandbox.journal()["entries"][moved.to_str().unwrap()]["missing"].is_number());
+    {
+        use finder_icon_themes::state::{read_state, save_state, MutationLock};
+        let _guard = MutationLock::acquire(&sandbox.path("state")).unwrap();
+        let mut state = read_state(&journal).unwrap();
+        state
+            .entries
+            .get_mut(moved.to_str().unwrap())
+            .unwrap()
+            .missing_since = Some(1);
+        save_state(&journal, &state).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while sandbox.journal()["entries"][moved.to_str().unwrap()].is_object()
+        && Instant::now() < deadline
+    {
+        fs::write(repo.join("heartbeat.ts"), "ongoing editing").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        sandbox.journal()["entries"][moved.to_str().unwrap()].is_null(),
+        "ongoing events must not starve missing-record maintenance"
+    );
 }
 
 #[test]
